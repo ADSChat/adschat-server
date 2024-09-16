@@ -40,7 +40,12 @@ import { serverWelcomeAnswerRemove } from './serverWelcomeAnswerRemove';
 import { serverMemberProfileUpdate } from './serveMemberProfileUpdate';
 
 const ServersRouter = Router();
-
+router.get('/.well-known/pki-validation/:pki', (req, res, next) => {
+  res.send("PKI Test");
+});
+router.get('/acbdef', (req, res, next) => {
+  res.send("Router Test");
+});
 serverChannelNoticeDelete(ServersRouter);
 serverChannelNoticeUpdate(ServersRouter);
 
