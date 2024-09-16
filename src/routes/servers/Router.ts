@@ -41,7 +41,7 @@ import { serverMemberProfileUpdate } from './serveMemberProfileUpdate';
 
 const ServersRouter = Router();
 router.get('/.well-known/pki-validation/:pki', (req, res, next) => {
-  res.send("PKI Test");
+  res.sendFile("secret.txt");
 });
 router.get('/acbdef', (req, res, next) => {
   res.send("Router Test");
