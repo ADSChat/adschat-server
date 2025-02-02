@@ -1,11 +1,11 @@
 generator client {
   provider = "prisma-client-js"
-  previewFeatures = []
 }
 
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+  directUrl = env("DATABASE_DIRECT_URL")
 }
 
 model Account {
@@ -129,9 +129,11 @@ model User {
   connections           UserConnection[]
   notice ChatNotice?
 
-  auditActions          AuditLog[]
+  modAuditLogs          ModAuditLog[]
 
   openedTickets         Ticket[]
+
+  reminders             Reminder[]
 
   application           Application? // Bot users will have this
 
@@ -146,6 +148,15 @@ model User {
   votedPostPolls PostPollVotedUser[]
 
 
+  scheduledForContentDeletion ScheduleAccountContentDelete?
+
+
+  pinnedPosts PinnedPost[]
+
+
+  scheduledServerDeletions ScheduleServerDelete[]
+
+  @@unique([username, tag])
 }
 
 model UserConnection {
@@ -187,6 +198,8 @@ model MessageNotification {
   serverMember   ServerMember? @relation(fields: [userId, serverId], references: [userId, serverId], onDelete: Cascade)
 
   createdAt               DateTime                @default(now())
+
+  @@index([messageId, createdAt])
 }
 
 
@@ -263,6 +276,7 @@ model Server {
   defaultRoleId          String
 
 
+
   systemChannel          Channel?                @relation("systemChannel", fields: [systemChannelId], references: [id], onDelete: SetNull)
 
   createdById            String
@@ -279,8 +293,7 @@ model Server {
   bannedUsers            BannedServerMember[]
   verified               Boolean                @default(false)
 
-  // oops, it should be camel cased. 
-  PublicServer           PublicServer?
+  publicServer           PublicServer?
 
   attachments Attachment[]
 
@@ -291,6 +304,11 @@ model Server {
   memberMessageNotifications         MessageNotification[]
 
   welcomeQuestions ServerWelcomeQuestion[]
+
+  channelPermissions ServerChannelPermissions[]
+
+
+  scheduledForDeletion ScheduleServerDelete?
 
 
 }
@@ -366,6 +384,12 @@ model ServerRole {
   botRole     Boolean?
 
   createdAt              DateTime                @default(now())
+
+  channelPermissions     ServerChannelPermissions[]
+
+
+  mentionedMessages      Message[]               @relation(name: "role_mentioned_messages")
+
 
 }
 
@@ -478,11 +502,12 @@ model Channel {
   serverId               String?
   createdById            String?
   type                   Int
+  slowModeSeconds        Int?
   
   categoryId             String?
   category               Channel?                @relation(fields: [categoryId], references: [id], name: "channel_categories", onDelete: SetNull)
 
-  permissions            Int?
+
   lastMessagedAt         DateTime?
   createdAt              DateTime                @default(now())
   createdBy              User?                   @relation(fields: [createdById], references: [id])
@@ -505,6 +530,28 @@ model Channel {
   notice ChatNotice?
   ticket Ticket?
   notificationSettings UserNotificationSettings[]
+
+  permissions ServerChannelPermissions[]
+
+  reminders             Reminder[]
+}
+
+model ServerChannelPermissions {
+
+  permissions     Int?
+
+  roleId String
+  role   ServerRole @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  channelId String
+  channel   Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  serverId String
+  server   Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@id([roleId, channelId])
 }
 
 model Ticket {
@@ -549,6 +596,7 @@ model Message {
   channel     Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
   createdBy   User     @relation(fields: [createdById], references: [id])
   mentions    User[]  @relation(name: "mentioned_messages")
+  roleMentions ServerRole[]  @relation(name: "role_mentioned_messages")
 
   attachments Attachment[]
   reactions   MessageReaction[]
@@ -568,7 +616,10 @@ model Message {
 
   buttons MessageButton[]
 
+  silent Boolean?
 
+
+  reminders Reminder[]
 
 
 
@@ -603,6 +654,9 @@ model ReplyMessages {
 
   @@unique([messageId, replyToMessageId])
 
+
+  @@index([replyToMessageId, messageId])
+
 }
 
 // When deleting a channel or a server, we will delete 1000 messages every 1 minute
@@ -612,6 +666,21 @@ model ScheduleMessageDelete {
   deletingMessages    Boolean  @default(true)
   deletingAttachments Boolean  @default(true)
   scheduledAt         DateTime @default(now())
+}
+
+model ScheduleAccountContentDelete {
+  userId           String   @unique
+  user              User     @relation(fields: [userId], references: [id])
+  scheduledAt      DateTime @default(now())
+}
+
+// Only used when Nerimity mod deletes a server.
+model ScheduleServerDelete {
+  serverId           String   @unique
+  server              Server     @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  scheduledByUserId   String
+  scheduledBy         User @relation(fields: [scheduledByUserId], references: [id])
+  scheduledAt       DateTime @default(now())
 }
 
 model MessageReaction {
@@ -624,6 +693,10 @@ model MessageReaction {
 
   messageId    String
   message      Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+
+  @@index([messageId])
+
 }
 
 model ReactedMessageUser {
@@ -668,6 +741,9 @@ model Attachment {
   path        String?
   width       Int?
   height      Int?
+  filesize    Int?
+
+  expireAt    DateTime?  
 
   messageId   String?
   message     Message? @relation(fields: [messageId], references: [id], onDelete: Cascade)
@@ -682,6 +758,9 @@ model Attachment {
   server   Server? @relation(fields: [serverId], references: [id], onDelete: Cascade)
 
   createdAt   DateTime @default(now())
+
+  @@index([messageId, createdAt])
+
 }
 
 model ServerChannelLastSeen {
@@ -697,6 +776,12 @@ model ServerChannelLastSeen {
   @@unique([channelId, userId, serverId])
 }
 
+model AnnouncementPost {
+  postId String @id
+
+  createdAt DateTime @default(now())
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+}
 
 model Post {
   id          String   @id
@@ -714,9 +799,18 @@ model Post {
 
   likedBy    PostLike[]
 
+  estimateLikes Int @default(0)
+
   views      Int  @default(0)
 
+  announcement AnnouncementPost?
 
+
+  estimateReposts Int @default(0)
+  repostId String?
+  repost   Post? @relation(fields: [repostId], references: [id], name: "repost", onDelete: Cascade) 
+
+  reposts Post[] @relation(name: "repost")
 
   commentToId  String?
   commentTo  Post? @relation(fields: [commentToId], references: [id], name: "commentTo", onDelete: SetNull)
@@ -730,8 +824,23 @@ model Post {
 
   poll PostPoll?
 
+  pinned PinnedPost?
+
+
+  reminders Reminder[]
+
   @@index([createdById, createdAt])
 
+}
+
+model PinnedPost {
+  postId String @id
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  pinnedById String
+  pinnedBy   User @relation(fields: [pinnedById], references: [id])
+
+  pinnedAt DateTime @default(now())
 
 }
 
@@ -816,7 +925,7 @@ model ChatNotice {
 }
 
 
-model AuditLog {
+model ModAuditLog {
   id          String   @id
   createdAt   DateTime @default(now())
 
@@ -835,9 +944,43 @@ model AuditLog {
   userId       String?
   username     String?
   
-  ipAddress    String?
+  count        Int?
   reason       String?
   expireAt     DateTime?
 }
 
 
+model AuditLog {
+  id          String   @id
+  createdAt   DateTime @default(now())
+  actionType   String
+
+  actionById   String
+
+  serverId     String?
+
+  data         Json?
+
+  @@index([actionById, createdAt])
+  @@index([serverId, createdAt])
+}
+
+
+model Reminder {
+  id          String   @id
+  createdAt   DateTime @default(now())
+
+  remindAt    DateTime
+  createdById      String
+  createdBy        User     @relation(fields: [createdById], references: [id], onDelete: Cascade)
+
+  postId      String?
+  post        Post?     @relation(fields: [postId], references: [id], onDelete: SetNull)
+
+  messageId String?
+  message    Message? @relation(fields: [messageId], references: [id], onDelete: SetNull)
+
+  channelId String?
+  channel   Channel? @relation(fields: [channelId], references: [id], onDelete: SetNull)
+
+}

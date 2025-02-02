@@ -1,38 +1,23 @@
 import { Request, Response, Router } from 'express';
 import { body } from 'express-validator';
 import { prisma } from '../../common/database';
-import {
-  customExpressValidatorResult,
-  generateError,
-} from '../../common/errorHandler';
+import { customExpressValidatorResult, generateError } from '../../common/errorHandler';
 import { generateId } from '../../common/flakeId';
 import { removeDuplicates } from '../../common/utils';
 import { authenticate } from '../../middleware/authenticate';
 import { isModMiddleware } from './isModMiddleware';
-import { AuditLogType } from '../../common/AuditLog';
+import { ModAuditLogType } from '../../common/ModAuditLog';
 import { checkUserPassword } from '../../services/UserAuthentication';
-import { deleteImage } from '../../common/nerimityCDN';
+import { deleteFile } from '../../common/nerimityCDN';
 
 export function postBatchSuspend(Router: Router) {
   Router.post(
     '/moderation/posts/delete',
     authenticate(),
     isModMiddleware,
-    body('postIds')
-      .not()
-      .isEmpty()
-      .withMessage('postIds is required')
-      .isArray()
-      .withMessage('postIds must be an array.'),
+    body('postIds').not().isEmpty().withMessage('postIds is required').isArray().withMessage('postIds must be an array.'),
 
-    body('password')
-      .isLength({ min: 4, max: 72 })
-      .withMessage('Password must be between 4 and 72 characters long.')
-      .isString()
-      .withMessage('Password must be a string!')
-      .not()
-      .isEmpty()
-      .withMessage('Password is required'),
+    body('password').isLength({ min: 4, max: 72 }).withMessage('Password must be between 4 and 72 characters long.').isString().withMessage('Password must be a string!').not().isEmpty().withMessage('Password is required'),
     route
   );
 }
@@ -52,28 +37,18 @@ async function route(req: Request<unknown, unknown, Body>, res: Response) {
     where: { id: req.userCache.account?.id },
     select: { password: true },
   });
-  if (!account)
-    return res
-      .status(404)
-      .json(generateError('Something went wrong. Try again later.'));
+  if (!account) return res.status(404).json(generateError('Something went wrong. Try again later.'));
 
-  const isPasswordValid = await checkUserPassword(
-    account.password,
-    req.body.password
-  );
-  if (!isPasswordValid)
-    return res.status(403).json(generateError('Invalid password.', 'password'));
+  const isPasswordValid = await checkUserPassword(account.password, req.body.password);
+  if (!isPasswordValid) return res.status(403).json(generateError('Invalid password.', 'password'));
 
-  if (req.body.postIds.length >= 5000)
-    return res
-      .status(403)
-      .json(generateError('post ids must contain less than 5000 ids.'));
+  if (req.body.postIds.length >= 5000) return res.status(403).json(generateError('post ids must contain less than 5000 ids.'));
 
   const sanitizedPostIds = removeDuplicates(req.body.postIds) as string[];
 
   const posts = await prisma.post.findMany({
     where: { id: { in: sanitizedPostIds }, deleted: null },
-    select: {id: true, createdBy: {select: {id: true, username: true}}, attachments: {select: {path: true}}},
+    select: { id: true, createdBy: { select: { id: true, username: true } }, attachments: { select: { path: true } } },
   });
   const validPostIds = posts.map((post) => post.id);
   if (!validPostIds.length) {
@@ -82,23 +57,24 @@ async function route(req: Request<unknown, unknown, Body>, res: Response) {
 
   await prisma.$transaction([
     prisma.post.updateMany({
-      where: { id: {in: validPostIds} },
+      where: { id: { in: validPostIds } },
       data: {
         content: null,
         deleted: true,
       },
     }),
-    prisma.postLike.deleteMany({ where: { postId: {in: validPostIds} } }),
-    prisma.attachment.deleteMany({ where: { postId: {in: validPostIds} } }),
-    prisma.postPoll.deleteMany({ where: { postId: {in: validPostIds} } }),
+    prisma.postLike.deleteMany({ where: { postId: { in: validPostIds } } }),
+    prisma.attachment.deleteMany({ where: { postId: { in: validPostIds } } }),
+    prisma.postPoll.deleteMany({ where: { postId: { in: validPostIds } } }),
+    prisma.announcementPost.deleteMany({ where: { postId: { in: validPostIds } } }),
   ]);
 
-  await prisma.auditLog.createMany({
-    data: posts.map(post => ({
+  await prisma.modAuditLog.createMany({
+    data: posts.map((post) => ({
       id: generateId(),
-      actionType: AuditLogType.postDelete,
+      actionType: ModAuditLogType.postDelete,
       actionById: req.userCache.id,
-      
+
       username: post.createdBy.username,
       userId: post.createdBy.id,
     })),
@@ -111,7 +87,6 @@ async function route(req: Request<unknown, unknown, Body>, res: Response) {
     if (!post?.attachments[0]) continue;
     const attachment = post.attachments[0];
     if (!attachment.path) continue;
-    await deleteImage(attachment.path).catch(() => {});
+    await deleteFile(attachment.path).catch(() => {});
   }
-
 }

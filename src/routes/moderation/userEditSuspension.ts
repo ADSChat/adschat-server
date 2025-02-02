@@ -8,7 +8,7 @@ import { authenticate } from '../../middleware/authenticate';
 import { disconnectUsers } from '../../services/Moderation';
 import { isModMiddleware } from './isModMiddleware';
 import { removeAllowedIPsCache } from '../../cache/UserCache';
-import { AuditLogType } from '../../common/AuditLog';
+import { ModAuditLogType } from '../../common/ModAuditLog';
 import { checkUserPassword } from '../../services/UserAuthentication';
 import { addToObjectIfExists } from '../../common/addToObjectIfExists';
 
@@ -81,10 +81,10 @@ async function route(req: Request<unknown, unknown, Body>, res: Response) {
     where: { account: { userId: { in: sanitizedUserIds } } },
   });
 
-  await prisma.auditLog.createMany({
+  await prisma.modAuditLog.createMany({
     data: suspendedUsers.map((suspend) => ({
       id: generateId(),
-      actionType: AuditLogType.userSuspendUpdate,
+      actionType: ModAuditLogType.userSuspendUpdate,
       actionById: req.userCache.id,
       username: suspend.user.username,
       userId: suspend.user.id,

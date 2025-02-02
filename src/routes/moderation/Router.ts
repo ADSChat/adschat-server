@@ -22,12 +22,22 @@ import { getPosts } from './getPosts';
 import { postBatchSuspend } from './postBatchDelete';
 import { useEditSuspension } from './userEditSuspension';
 import { userBatchWarn } from './userBatchWarn';
+import { announcementPostCreate } from './announcementPostCreate';
+import { announcementPostRemove } from './announcementPostRemove';
+import { getUsersAuditLog } from './getUsersAuditLog';
+import { getMessages } from './getMessages';
+import { serverUndoDelete } from './serverUndoDelete';
+import { searchAuditLogs } from './searchAuditLogs';
 
 const ModerationRouter = Router();
 
+getMessages(ModerationRouter);
+
 userBatchWarn(ModerationRouter);
 
+getUsersAuditLog(ModerationRouter);
 getAuditLogs(ModerationRouter);
+searchAuditLogs(ModerationRouter);
 getStats(ModerationRouter);
 userBatchUnsuspend(ModerationRouter);
 userBatchSuspend(ModerationRouter);
@@ -42,6 +52,7 @@ getUsers(ModerationRouter);
 getUsersOnline(ModerationRouter);
 
 serverDelete(ModerationRouter);
+serverUndoDelete(ModerationRouter);
 getServer(ModerationRouter);
 updateServer(ModerationRouter);
 getServers(ModerationRouter);
@@ -49,6 +60,8 @@ getTicket(ModerationRouter);
 getTickets(ModerationRouter);
 ticketUpdate(ModerationRouter);
 
+announcementPostCreate(ModerationRouter);
+announcementPostRemove(ModerationRouter);
 searchPosts(ModerationRouter);
 getPosts(ModerationRouter);
 postBatchSuspend(ModerationRouter);

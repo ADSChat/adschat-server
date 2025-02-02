@@ -6,8 +6,19 @@ import { UserStatus } from '../../types/User';
 import { getVoiceUserByUserId } from '../../cache/VoiceCache';
 import { leaveVoiceChannel } from '../../services/Voice';
 import { LastOnlineStatus } from '../../services/User/User';
+import { authQueue } from './onAuthenticate';
 
 export async function onDisconnect(socket: Socket) {
+  const ip = (socket.handshake.headers['cf-connecting-ip'] || socket.handshake.headers['x-forwarded-for'] || socket.handshake.address)?.toString();
+  authQueue.add(
+    async () => {
+      await handleDisconnect(socket);
+    },
+    { groupName: ip }
+  );
+}
+
+const handleDisconnect = async (socket: Socket) => {
   const userId = await getUserIdBySocketId(socket.id);
   if (!userId) return;
   const presence = await getUserPresences([userId], true);
@@ -39,4 +50,4 @@ export async function onDisconnect(socket: Socket) {
   if (voice?.socketId === socket.id) {
     leaveVoiceChannel(userId);
   }
-}
+};

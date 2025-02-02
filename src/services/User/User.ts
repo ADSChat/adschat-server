@@ -7,7 +7,7 @@ import { FriendStatus } from '../../types/Friend';
 import { dateToDateTime, excludeFields, prisma, publicUserExcludeFields } from '../../common/database';
 import { generateId } from '../../common/flakeId';
 
-import { createPostNotification, fetchLatestPost, PostNotificationType } from '../Post';
+import { createPostNotification, fetchLatestPost, fetchPinnedPost, fetchPinnedPosts, PostNotificationType } from '../Post';
 
 import { leaveVoiceChannel } from '../Voice';
 import { MessageInclude } from '../Message';
@@ -16,6 +16,7 @@ import { addBit, hasBit, isUserAdmin, removeBit, USER_BADGES } from '../../commo
 import { Prisma } from '@prisma/client';
 import { UserStatus } from '../../types/User';
 import { createHash } from 'node:crypto';
+import { checkUserPassword } from '../UserAuthentication';
 
 export const getBlockedUserIds = async (userIds: string[], blockedUserId: string) => {
   const blockedUsers = await prisma.friend.findMany({
@@ -53,7 +54,7 @@ export const isIpBanned = async (ipAddress: string) => {
   if (!isExpired(ban.expireAt)) {
     return ban;
   }
-  await prisma.bannedIp.delete({ where: { ipAddress } });
+  await prisma.bannedIp.delete({ where: { ipAddress } }).catch(() => {});
   return false;
 };
 
@@ -122,6 +123,11 @@ export const closeDMChannel = async (userId: string, channelId: string) => {
 // if the recipient has not opened the channel, it will be created.
 // if the recipient has opened the channel, we will create a new inbox with the existing channel id.
 export const openDMChannel = async (userId: string, friendId: string) => {
+  const isValidFriendId = await prisma.user.findUnique({ where: { id: friendId } });
+  if (!isValidFriendId) {
+    return [null, generateError('Invalid userId')] as const;
+  }
+
   const inbox = await prisma.inbox.findFirst({
     where: {
       OR: [
@@ -183,7 +189,7 @@ export const openDMChannel = async (userId: string, friendId: string) => {
         recipient: { select: publicUserExcludeFields },
       },
     })
-    // eslint-disable-next-line @typescript-eslint/no-empty-function
+
     .catch(() => {});
 
   if (!newInbox) {
@@ -260,11 +266,29 @@ export const updateUserPresence = async (userId: string, presence: PresencePaylo
   return ['Presence updated.', null];
 };
 
-export const getUserDetails = async (requesterId: string, recipientId: string) => {
+export const getUserDetails = async (requesterId: string, recipientId: string, requesterIpAddress: string, includePinnedPosts = false) => {
   const user = await prisma.user.findFirst({
     where: { id: recipientId },
     select: {
       ...publicUserExcludeFields,
+      application: {
+        select: {
+          creatorAccount: {
+            select: {
+              user: {
+                select: {
+                  username: true,
+                  id: true,
+                  tag: true,
+                  avatar: true,
+                  badges: true,
+                  hexColor: true,
+                },
+              },
+            },
+          },
+        },
+      },
       followers: {
         where: { followedById: requesterId },
         select: { followedToId: true },
@@ -329,7 +353,16 @@ export const getUserDetails = async (requesterId: string, recipientId: string) =
     userId: recipientId,
     requesterUserId: requesterId,
     bypassBlocked: isAdmin,
+    requesterIpAddress,
   });
+  const pinnedPosts = includePinnedPosts
+    ? await fetchPinnedPosts({
+        userId: recipientId,
+        requesterUserId: requesterId,
+        bypassBlocked: isAdmin,
+        requesterIpAddress,
+      })
+    : [];
 
   const isBlocked = await isUserBlocked(requesterId, recipientId);
 
@@ -362,6 +395,7 @@ export const getUserDetails = async (requesterId: string, recipientId: string) =
       latestPost,
       profile: user.profile,
       ...(!isSuspensionExpired ? { suspensionExpiresAt: suspension?.expireAt } : {}),
+      ...(includePinnedPosts ? { pinnedPosts } : {}),
     },
     null,
   ];
@@ -599,7 +633,6 @@ export async function getUserNotifications(userId: string) {
           NOT: { id: { in: ids } },
           userId,
         },
-        // eslint-disable-next-line @typescript-eslint/no-empty-function
       })
       .then(() => {});
   }
@@ -624,4 +657,16 @@ export async function dismissUserNotice(noticeId: string, userId: string) {
     },
   });
   return [true, null];
+}
+
+export async function verifyPassword(accountId: string, password: string) {
+  const account = await prisma.account.findFirst({
+    where: { id: accountId },
+    select: { password: true },
+  });
+  if (!account) return [false, generateError('Account not found.')] as const;
+
+  const isPasswordValid = await checkUserPassword(account.password, password);
+  if (!isPasswordValid) return [false, generateError('Invalid Password')] as const;
+  return [true] as const;
 }

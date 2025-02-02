@@ -19,13 +19,17 @@ async function route(req: Request, res: Response) {
 
   const posts = await fetchPosts({
     where: {
-      OR: [{ id: search }, {createdById: search}],
+      OR: [{ id: search }, { createdById: search }],
     },
     withReplies: true,
     bypassBlocked: true,
+    requesterIpAddress: req.userIP,
     requesterUserId: req.userCache.id,
     limit: limit,
     afterId: after,
+    additionalInclude: {
+      announcement: { select: { createdAt: true } },
+    },
   });
 
   res.json(posts);

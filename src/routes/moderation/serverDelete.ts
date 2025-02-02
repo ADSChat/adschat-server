@@ -1,38 +1,25 @@
 import { Request, Response, Router } from 'express';
 import { body } from 'express-validator';
 import { prisma } from '../../common/database';
-import {
-  customExpressValidatorResult,
-  generateError,
-} from '../../common/errorHandler';
+import { customExpressValidatorResult, generateError } from '../../common/errorHandler';
 
 import { authenticate } from '../../middleware/authenticate';
 import { isModMiddleware } from './isModMiddleware';
-import { deleteServer } from '../../services/Server';
+// import { deleteServer } from '../../services/Server';
 import { generateId } from '../../common/flakeId';
-import { AuditLogType } from '../../common/AuditLog';
+import { ModAuditLogType } from '../../common/ModAuditLog';
 import { checkUserPassword } from '../../services/UserAuthentication';
+import { warnUsersBatch } from '../../services/Moderation';
+import { deleteServerCache } from '../../cache/ServerCache';
+import { emitServerRemoveScheduleDelete, emitServerScheduleDelete } from '../../emits/Server';
 
 export function serverDelete(Router: Router) {
-  Router.delete<any>(
-    '/moderation/servers/:serverId',
-    authenticate(),
-    isModMiddleware,
-
-    body('password')
-      .isLength({ min: 4, max: 72 })
-      .withMessage('Password must be between 4 and 72 characters long.')
-      .isString()
-      .withMessage('Password must be a string!')
-      .not()
-      .isEmpty()
-      .withMessage('Password is required'),
-    route
-  );
+  Router.delete<any>('/moderation/servers/:serverId', authenticate(), isModMiddleware, body('reason').not().isEmpty().withMessage('Reason is required.').isString().withMessage('Reason must be a string.').isLength({ min: 0, max: 500 }), body('password').isLength({ min: 4, max: 72 }).withMessage('Password must be between 4 and 72 characters long.').isString().withMessage('Password must be a string!').not().isEmpty().withMessage('Password is required'), route);
 }
 
 interface Body {
   password: string;
+  reason?: string;
 }
 
 interface Params {
@@ -46,42 +33,61 @@ async function route(req: Request<Params, unknown, Body>, res: Response) {
   }
 
   const account = await prisma.account.findFirst({
-    where: { id: req.userCache.account.id },
+    where: { id: req.userCache.account!.id },
     select: { password: true },
   });
-  if (!account)
-    return res
-      .status(404)
-      .json(generateError('Something went wrong. Try again later.'));
+  if (!account) return res.status(404).json(generateError('Something went wrong. Try again later.'));
 
-  const isPasswordValid = await checkUserPassword(
-    account.password,
-    req.body.password
-  );
-  if (!isPasswordValid)
-    return res.status(403).json(generateError('Invalid password.', 'password'));
+  const isPasswordValid = await checkUserPassword(account.password, req.body.password);
+  if (!isPasswordValid) return res.status(403).json(generateError('Invalid password.', 'password'));
 
   const server = await prisma.server.findUnique({
     where: { id: req.params.serverId },
   });
 
-  if (!server)
-    return res.status(404).json(generateError('Server does not exist.'));
+  if (!server) return res.status(404).json(generateError('Server does not exist.'));
 
-  const [, error] = await deleteServer(req.params.serverId);
-  if (error) {
-    return res.status(403).json(error);
+  // const [, error] = await deleteServer(req.params.serverId, req.userCache.id);
+  // if (error) {
+  //   return res.status(403).json(error);
+  // }
+
+  const scheduledDeletion = await prisma.scheduleServerDelete
+    .create({
+      data: {
+        serverId: server.id,
+        scheduledByUserId: req.userCache.id,
+      },
+    })
+    .catch((e) => {
+      console.error(e);
+      return null;
+    });
+  if (!scheduledDeletion) {
+    return res.status(500).json(generateError('Failed to schedule server deletion.'));
   }
+  await deleteServerCache(server.id);
 
-  await prisma.auditLog.create({
+  await warnUsersBatch({
+    userIds: [server.createdById],
+    reason: `${server.name} scheduled deletion: ${req.body.reason}`,
+    modUserId: req.userCache.id,
+    skipAuditLog: true,
+  });
+
+  await prisma.modAuditLog.create({
     data: {
       id: generateId(),
-      actionType: AuditLogType.serverDelete,
+      actionType: ModAuditLogType.serverDelete,
       actionById: req.userCache.id,
       serverName: server.name,
+      reason: req.body.reason,
       serverId: server.id,
+      userId: server.createdById,
     },
   });
 
-  res.status(200).json({ success: true });
+  emitServerScheduleDelete(server.id, scheduledDeletion.scheduledAt);
+
+  res.status(200).json({ success: true, scheduledDeletion });
 }

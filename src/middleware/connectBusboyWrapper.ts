@@ -22,6 +22,14 @@ export function connectBusboyWrapper(req: Request, res: Response, next: NextFunc
   req.busboy.on('file', async (name, file, info) => {
     req.body = fields;
 
+    if (req.body.silent) {
+      try {
+        req.body.silent = JSON.parse(req.body.silent);
+      } catch {
+        return res.status(400).json(generateError('Invalid silent format.'));
+      }
+    }
+
     // used for message replies
     if (typeof req.body.replyToMessageIds === 'string') {
       try {
@@ -37,7 +45,7 @@ export function connectBusboyWrapper(req: Request, res: Response, next: NextFunc
     next();
   });
   req.busboy.on('error', (error) => {
-    console.log(error);
+    console.error(error);
     res.json(generateError('Something went wrong. Please try again later. (connectBusboyWrapper.ts)'));
   });
 }

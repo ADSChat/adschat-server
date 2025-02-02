@@ -1,7 +1,7 @@
-import fetch from 'node-fetch';
 import env from './env';
 
 export async function turnstileVerify(token: string) {
+
   if (env.DEV_MODE) return true;
 
   const params = new URLSearchParams();
@@ -14,11 +14,12 @@ export async function turnstileVerify(token: string) {
       method: 'POST',
       body: params,
     }
-    // eslint-disable-next-line @typescript-eslint/no-empty-function
-  ).catch(() => {});
+     
+  ).catch(() => { });
 
   if (!res) return false;
 
   const json = (await res.json()) as { success: boolean };
   return json.success;
 }
+

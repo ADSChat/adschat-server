@@ -7,8 +7,9 @@ import { serverMemberVerification } from '../../middleware/serverMemberVerificat
 import { serverMemberRemoveBan } from '../../services/Server';
 
 export function serverMemberBanRemove(Router: Router) {
-  Router.delete('/servers/:serverId/bans/:userId',
-    authenticate({allowBot: true}),
+  Router.delete(
+    '/servers/:serverId/bans/:userId',
+    authenticate({ allowBot: true }),
     serverMemberVerification(),
     memberHasRolePermissionMiddleware(ROLE_PERMISSIONS.BAN),
     rateLimit({
@@ -23,10 +24,9 @@ export function serverMemberBanRemove(Router: Router) {
 async function route(req: Request, res: Response) {
   const userId = req.params.userId as string;
 
-  const [, error] = await serverMemberRemoveBan(req.serverCache.id, userId);
+  const [, error] = await serverMemberRemoveBan(req.serverCache.id, userId, req.userCache.id);
   if (error) {
     return res.status(400).json(error);
   }
   res.json({ status: true });
-
 }

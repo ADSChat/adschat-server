@@ -1,3 +1,4 @@
+export const USER_AUTH_QUEUE_POSITION = 'user:auth_queue_position';
 export const AUTHENTICATED = 'user:authenticated';
 export const AUTHENTICATE_ERROR = 'user:authenticate_error';
 export const USER_UPDATED_SELF = 'user:updatedSelf';
@@ -8,6 +9,8 @@ export const USER_CONNECTION_ADDED = 'user:connection_added';
 export const USER_CONNECTION_REMOVED = 'user:connection_removed';
 
 export const USER_NOTIFICATION_SETTINGS_UPDATE = 'user:notification_settings_update';
+export const USER_REMINDER_ADD = 'user:reminder_add';
+export const USER_REMINDER_REMOVE = 'user:reminder_remove';
 
 export const USER_PRESENCE_UPDATE = 'user:presence_update';
 export const USER_BLOCKED = 'user:blocked';
@@ -40,6 +43,9 @@ export const SERVER_MEMBER_UPDATED = 'server:member_updated';
 export const SERVER_CHANNEL_CREATED = 'server:channel_created';
 export const SERVER_CHANNEL_UPDATED = 'server:channel_updated';
 export const SERVER_CHANNEL_DELETED = 'server:channel_deleted';
+export const SERVER_CHANNEL_PERMISSIONS_UPDATED = 'server:channel_permissions_updated';
+export const SERVER_SCHEDULE_DELETE = 'server:schedule_delete';
+export const SERVER_REMOVE_SCHEDULE_DELETE = 'server:remove_schedule_delete';
 
 export const MESSAGE_CREATED = 'message:created';
 export const MESSAGE_UPDATED = 'message:updated';

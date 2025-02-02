@@ -1,9 +1,9 @@
 import { Channel, Inbox } from '@prisma/client';
 import { Socket } from 'socket.io';
 import { addSocketUser, authenticateUser, getUserPresences } from '../../cache/UserCache';
-import { AUTHENTICATED } from '../../common/ClientEventNames';
+import { AUTHENTICATED, USER_AUTH_QUEUE_POSITION } from '../../common/ClientEventNames';
 import { prisma, publicUserExcludeFields } from '../../common/database';
-import { CHANNEL_PERMISSIONS, ROLE_PERMISSIONS, hasBit } from '../../common/Bitwise';
+import { CHANNEL_PERMISSIONS, ROLE_PERMISSIONS, addBit, hasBit } from '../../common/Bitwise';
 import { removeDuplicates } from '../../common/utils';
 import { emitError } from '../../emits/Connection';
 import { emitUserPresenceUpdate } from '../../emits/User';
@@ -16,24 +16,51 @@ import { getVoiceUsersByChannelId } from '../../cache/VoiceCache';
 import { serverMemberHasPermission } from '../../common/serverMembeHasPermission';
 import { LastOnlineStatus } from '../../services/User/User';
 import { FriendStatus } from '../../types/Friend';
-import env from '../../common/env';
-import { AltQueue } from '@nerimity/mimiqueue';
+import { createQueue } from '@nerimity/mimiqueue';
 import { redisClient } from '../../common/redis';
+import { ReminderSelect } from '../../services/Reminder';
 
 interface Payload {
   token: string;
 }
 
-// const authQueue = new AltQueue({
-//   name: 'wsAuth',
-//   redisClient,
-// });
+export const authQueue = createQueue({
+  name: 'wsAuth',
+  redisClient,
+  minTime: 10,
+});
 
 export async function onAuthenticate(socket: Socket, payload: Payload) {
+  const queueId = await authQueue.genId();
+
+  if (socket.connected) {
+    const setTimeout = setInterval(async () => {
+      const pos = await authQueue.getQueuePosition(queueId);
+      const actualPos = pos === null ? 0 : pos + 1;
+      socket.emit(USER_AUTH_QUEUE_POSITION, { pos: actualPos });
+      if (!actualPos) {
+        clearInterval(setTimeout);
+        return;
+      }
+      if (!socket.connected) {
+        clearInterval(setTimeout);
+      }
+    }, 5000);
+  }
+
+  authQueue.add(
+    async () => {
+      await handleAuthenticate(socket, payload).catch((err) => {
+        console.error(err);
+      });
+    },
+    { id: queueId }
+  );
+}
+
+const handleAuthenticate = async (socket: Socket, payload: Payload) => {
   const ip = (socket.handshake.headers['cf-connecting-ip'] || socket.handshake.headers['x-forwarded-for'] || socket.handshake.address)?.toString();
-  // const finish = await authQueue.start({ groupName: ip });
   if (!socket.connected) {
-    // finish();
     return;
   }
 
@@ -41,7 +68,6 @@ export async function onAuthenticate(socket: Socket, payload: Payload) {
 
   if (error !== null) {
     emitError(socket, { ...error, disconnect: true });
-    // finish();
     return;
   }
   socket.join(userCache.id);
@@ -49,6 +75,10 @@ export async function onAuthenticate(socket: Socket, payload: Payload) {
   const user = await prisma.user.findUnique({
     where: { id: userCache.id },
     include: {
+      reminders: {
+        orderBy: { remindAt: 'asc' },
+        select: ReminderSelect,
+      },
       notificationSettings: {
         select: {
           notificationPingMode: true,
@@ -77,7 +107,6 @@ export async function onAuthenticate(socket: Socket, payload: Payload) {
 
   if (!user) {
     emitError(socket, { message: 'User not found.', disconnect: true });
-    // finish();
     return;
   }
   const { servers, serverChannels, serverMembers, serverRoles } = await getServers(userCache.id);
@@ -119,36 +148,47 @@ export async function onAuthenticate(socket: Socket, payload: Payload) {
   for (let i = 0; i < servers.length; i++) {
     const server = servers[i]!;
     socket.join(server.id);
-  }
 
-  for (let i = 0; i < serverChannels.length; i++) {
-    const channel = serverChannels[i]!;
-
-    const server = servers.find((server) => server.id === channel.serverId);
-    if (!server) throw new Error(`Server not found (channelId: ${channel.id} serverId: ${channel.serverId})`);
+    const member = server.serverMembers.find((member) => member.user.id === userCache.id && member.serverId === server.id);
+    if (!member) continue;
+    const defaultRole = server.roles.find((role) => role.id === server.defaultRoleId);
+    const roleIds = [...member.roleIds, defaultRole!.id];
 
     const isCreator = server.createdById === userCache.id;
-    if (isCreator) {
+
+    for (let x = 0; x < server.channels.length; x++) {
+      const channel = server.channels[x]!;
+
+      if (isCreator) {
+        socket.join(channel.id);
+        continue;
+      }
+      let memberChannelPermissions = 0;
+
+      for (let y = 0; y < channel.permissions.length; y++) {
+        const permissions = channel.permissions[y]!;
+        if (!roleIds.includes(permissions.roleId)) continue;
+        memberChannelPermissions = addBit(memberChannelPermissions, permissions?.permissions || 0);
+      }
+
+      const isPublicChannel = hasBit(memberChannelPermissions, CHANNEL_PERMISSIONS.PUBLIC_CHANNEL.bit);
+      if (isPublicChannel) {
+        socket.join(channel.id);
+        continue;
+      }
+      const hasPermission = serverMemberHasPermission({
+        permission: ROLE_PERMISSIONS.ADMIN,
+        member,
+        serverRoles: server.roles,
+        defaultRoleId: server.defaultRoleId,
+      });
+      if (!hasPermission) continue;
+
       socket.join(channel.id);
-      continue;
     }
-
-    const isPrivateChannel = hasBit(channel.permissions || 0, CHANNEL_PERMISSIONS.PRIVATE_CHANNEL.bit);
-
-    if (!isPrivateChannel) {
-      socket.join(channel.id);
-      continue;
-    }
-
-    const hasPermission = serverMemberHasPermission({
-      permission: ROLE_PERMISSIONS.ADMIN,
-      member: serverMembers.find((member) => member.user.id === userCache.id && member.serverId === server.id)!,
-      serverRoles: serverRoles,
-      defaultRoleId: server.defaultRoleId,
-    });
-    if (!hasPermission) continue;
-
-    socket.join(channel.id);
+    server.serverMembers = undefined;
+    server.roles = undefined;
+    server.channels = undefined;
   }
 
   const isFirstConnect = await addSocketUser(userCache.id, socket.id, {
@@ -171,7 +211,6 @@ export async function onAuthenticate(socket: Socket, payload: Payload) {
 
   if (!socket.connected) {
     onDisconnect(socket);
-    // finish();
     return;
   }
 
@@ -197,6 +236,7 @@ export async function onAuthenticate(socket: Socket, payload: Payload) {
       emailConfirmed: user.account?.emailConfirmed,
       connections: user.connections,
       notices: user.notices,
+      reminders: user.reminders,
     },
     notificationSettings: user.notificationSettings,
     voiceChannelUsers,
@@ -212,5 +252,4 @@ export async function onAuthenticate(socket: Socket, payload: Payload) {
     inbox: inboxResponse,
     pid: process.pid,
   });
-  // finish();
-}
+};

@@ -9,7 +9,7 @@ import bcrypt from 'bcrypt';
 import { removeUserCacheByUserIds } from '../../cache/UserCache';
 import { getIO } from '../../socket/socket';
 import { AUTHENTICATE_ERROR } from '../../common/ClientEventNames';
-import { AuditLogType } from '../../common/AuditLog';
+import { ModAuditLogType } from '../../common/ModAuditLog';
 import { generateId } from '../../common/flakeId';
 import { checkUserPassword } from '../../services/UserAuthentication';
 import { Prisma } from '@prisma/client';
@@ -126,10 +126,10 @@ async function route(req: Request, res: Response) {
     broadcaster.disconnectSockets(true);
   }
 
-  await prisma.auditLog.create({
+  await prisma.modAuditLog.create({
     data: {
       id: generateId(),
-      actionType: AuditLogType.userUpdate,
+      actionType: ModAuditLogType.userUpdate,
       actionById: req.userCache.id,
       username: newUser.username,
       userId: newUser.id,

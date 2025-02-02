@@ -2,7 +2,7 @@ import { cpus } from 'node:os';
 import { prisma } from './common/database';
 import { Log } from './common/Log';
 import schedule from 'node-schedule';
-import { deleteChannelAttachmentBatch } from './common/nerimityCDN';
+import { deleteChannelAttachmentBatch, deleteImageBatch } from './common/nerimityCDN';
 import env from './common/env';
 import { connectRedis, customRedisFlush, redisClient } from './common/redis';
 import { getAndRemovePostViewsCache } from './cache/PostViewsCache';
@@ -12,7 +12,8 @@ import { createIO } from './socket/socket';
 import { deleteAccount, deleteAllApplications, deleteOrLeaveAllServers } from './services/User/UserManagement';
 import { createHash } from 'node:crypto';
 import { addToObjectIfExists } from './common/addToObjectIfExists';
-import { handleTimeout } from '@nerimity/mimiqueue';
+import { createQueueProcessor } from '@nerimity/mimiqueue';
+import { deleteServer } from './services/Server';
 
 (Date.prototype.toJSON as unknown as (this: Date) => number) = function () {
   return this.getTime();
@@ -28,7 +29,7 @@ if (cluster.isPrimary) {
 
   await connectRedis();
   await customRedisFlush();
-  handleTimeout({
+  await createQueueProcessor({
     redisClient,
   });
 
@@ -43,18 +44,22 @@ if (cluster.isPrimary) {
     scheduleBumpReset();
     vacuumSchedule();
     scheduleDeleteMessages();
+    scheduleDeleteAccountContent();
     removeIPAddressSchedule();
     schedulePostViews();
     scheduleSuspendedAccountDeletion();
+    scheduleServerDeletion();
+    removeExpiredBannedIpsSchedule();
   });
 
   for (let i = 0; i < cpuCount; i++) {
-    cluster.fork();
+    cluster.fork({ CLUSTER_INDEX: i });
   }
 
   cluster.on('exit', (worker, code, signal) => {
-    console.log(`Worker process ${worker.process.pid} died. Restarting...`);
-    cluster.fork();
+    console.error(`Worker process ${worker.process.pid} died.`);
+    // have to just restart all clusters because of redis cache issues with socket.io online users.
+    process.exit(code);
   });
 } else {
   import('./worker');
@@ -71,6 +76,88 @@ function scheduleBumpReset() {
     await prisma.publicServer.updateMany({ data: { bumpCount: 0 } });
     Log.info('All public server bumps have been reset to 0.');
   });
+}
+
+async function scheduleDeleteAccountContent() {
+  setInterval(async () => {
+    const likedPosts = await prisma.postLike.findMany({
+      take: 300,
+      where: {
+        likedBy: {
+          account: null,
+          application: null,
+        },
+      },
+      select: { id: true },
+    });
+
+    if (likedPosts.length) {
+      const ids = likedPosts.map((p) => p.id);
+      await prisma.postLike.deleteMany({ where: { id: { in: ids } } });
+    }
+
+    const messages = await prisma.message.findMany({
+      take: 300,
+      orderBy: {
+        createdAt: 'desc',
+      },
+      select: { id: true, attachments: { select: { path: true } } },
+      where: {
+        createdBy: {
+          scheduledForContentDeletion: { isNot: null },
+        },
+      },
+    });
+    const messageAttachments = messages.filter((m) => m.attachments.length).map((m) => m.attachments[0]?.path);
+    const messageIds = messages.map((m) => m.id);
+
+    const posts = await prisma.post.findMany({
+      take: 300,
+      orderBy: {
+        createdAt: 'desc',
+      },
+      select: { id: true, attachments: { select: { path: true } } },
+      where: {
+        deleted: null,
+        createdBy: {
+          scheduledForContentDeletion: { isNot: null },
+        },
+      },
+    });
+    const postAttachments = posts.filter((p) => p.attachments.length).map((p) => p.attachments[0]?.path);
+    const postIds = posts.map((p) => p.id);
+    if (messageIds.length) {
+      await prisma.message.deleteMany({
+        where: { id: { in: messageIds } },
+      });
+    }
+    if (postIds.length) {
+      await prisma.$transaction([
+        prisma.post.updateMany({
+          where: { id: { in: postIds } },
+          data: {
+            content: null,
+            deleted: true,
+          },
+        }),
+        prisma.post.deleteMany({ where: { repostId: { in: postIds } } }),
+        prisma.postLike.deleteMany({ where: { postId: { in: postIds } } }),
+        prisma.postPoll.deleteMany({ where: { postId: { in: postIds } } }),
+        prisma.attachment.deleteMany({ where: { postId: { in: postIds } } }),
+        prisma.announcementPost.deleteMany({ where: { postId: { in: postIds } } }),
+        prisma.pinnedPost.deleteMany({ where: { postId: { in: postIds } } }),
+      ]);
+    }
+    if (messages.length || posts.length || likedPosts.length) {
+      Log.info(`Deleted ${messages.length} messages & ${posts.length} posts & ${likedPosts.length} liked posts from deleted accounts.`);
+    }
+
+    const attachments = [...postAttachments, ...messageAttachments] as string[];
+
+    if (attachments.length) {
+      deleteImageBatch(attachments);
+    }
+  }, 60000);
 }
 
 // Messages are not deleted all at once to reduce database strain.
@@ -109,10 +196,11 @@ function scheduleDeleteMessages() {
           SELECT id 
           FROM "Message"
           WHERE "channelId"=${details.channelId}
-          LIMIT 1000       
+          ORDER BY "createdAt" DESC
+          LIMIT 300       
       );
     `;
-    if (deletedCount < 1000) {
+    if (deletedCount < 300) {
       await prisma.$transaction([
         prisma.scheduleMessageDelete.update({
           where: { channelId: details.channelId },
@@ -121,7 +209,7 @@ function scheduleDeleteMessages() {
         prisma.channel.delete({ where: { id: details.channelId } }),
       ]);
     }
-    Log.info('Deleted', deletedCount, 'message(s).');
+    Log.info('Deleted', deletedCount, 'message(s). channelId', details.channelId);
   }, 60000);
 }
 
@@ -156,6 +244,27 @@ async function removeIPAddressSchedule() {
   });
 }
 
+async function removeExpiredBannedIps() {
+  await prisma.bannedIp.deleteMany({
+    where: {
+      expireAt: {
+        lte: new Date(Date.now()),
+      },
+    },
+  });
+}
+async function removeExpiredBannedIpsSchedule() {
+  await removeExpiredBannedIps();
+  // Schedule the task to run everyday at 0:00 UTC
+  const rule = new schedule.RecurrenceRule();
+  rule.hour = 0;
+  rule.minute = 0;
+
+  schedule.scheduleJob(rule, async () => {
+    await removeExpiredBannedIps();
+  });
+}
+
 function schedulePostViews() {
   updatePostViews();
   setInterval(async () => {
@@ -166,40 +275,42 @@ async function updatePostViews() {
   const cacheData = await getAndRemovePostViewsCache();
   if (!cacheData.length) return;
 
-  await prisma.$transaction(
-    cacheData.map((d) =>
-      prisma.post.update({
-        where: { id: d.id },
-        data: { views: { increment: d.views } },
-      })
+  await prisma
+    .$transaction(
+      cacheData.map((d) =>
+        prisma.post.update({
+          where: { id: d.id },
+          data: { views: { increment: d.views } },
+        })
+      )
     )
-  );
+    .catch((err) => console.error(err));
 }
 
 function scheduleSuspendedAccountDeletion() {
   const oneMinuteToMilliseconds = 1 * 60 * 1000;
-  const oneMonthInThePast = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const fifteenDaysInThePast = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000);
   setTimeout(async () => {
     const suspension = await prisma.suspension.findFirst({
       where: {
         expireAt: null,
         userDeleted: false,
         suspendedAt: {
-          lte: oneMonthInThePast,
+          lte: fifteenDaysInThePast,
         },
       },
       select: {
         id: true,
-        user: { select: { id: true, username: true, account: { select: { email: true } } } },
+        user: { select: { bot: true, id: true, username: true, account: { select: { email: true } } } },
       },
     });
     if (suspension) {
       try {
         const emailSha = suspension.user.account?.email ? createHash('sha256').update(suspension.user.account.email).digest('hex') : undefined;
-        Log.info(`Deleting account ${suspension.user.username} because it was perm suspended more than 30 days ago.`);
+        Log.info(`Deleting account ${suspension.user.username} because it was perm suspended more than 15 days ago.`);
         await deleteAllApplications(suspension.user.id);
         await deleteOrLeaveAllServers(suspension.user.id);
-        await deleteAccount(suspension.user.id);
+        await deleteAccount(suspension.user.id, { bot: suspension.user.bot || false, deleteContent: true });
         await prisma.suspension.update({
           where: {
             id: suspension.id,
@@ -218,5 +329,34 @@ function scheduleSuspendedAccountDeletion() {
     }
 
     scheduleSuspendedAccountDeletion();
+  }, oneMinuteToMilliseconds);
+}
+function scheduleServerDeletion() {
+  const oneMinuteToMilliseconds = 1 * 60 * 1000;
+  const fiveDaysInThePast = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000);
+  setTimeout(async () => {
+    const scheduleItem = await prisma.scheduleServerDelete.findFirst({
+      where: {
+        scheduledAt: {
+          lte: fiveDaysInThePast,
+        },
+      },
+      select: {
+        server: {
+          select: { name: true },
+        },
+        serverId: true,
+        scheduledByUserId: true,
+      },
+    });
+    if (scheduleItem) {
+      try {
+        await deleteServer(scheduleItem.serverId, scheduleItem.scheduledByUserId);
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    scheduleServerDeletion();
   }, oneMinuteToMilliseconds);
 }

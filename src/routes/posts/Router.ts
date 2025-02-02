@@ -15,8 +15,15 @@ import { postEdit } from './postEdit';
 import { postsGetLikes } from './postGetLikes';
 import { postsDiscover } from './postsDiscover';
 import { postPollVote } from './postPollVote';
+import { postsGetAnnouncement } from './postsGetAnnouncement';
+import { postPin } from './postPin';
+import { postPinDelete } from './postPinDelete';
+import { postRepost } from './postRepost';
+import { postGetReposts } from './postGetReposts';
 
 const PostsRouter = Router();
+
+postsGetAnnouncement(PostsRouter);
 
 postPollVote(PostsRouter);
 postNotificationDismiss(PostsRouter);
@@ -30,10 +37,15 @@ postsGetLiked(PostsRouter);
 postDelete(PostsRouter);
 postsGet(PostsRouter);
 postCreate(PostsRouter);
+postRepost(PostsRouter);
 postEdit(PostsRouter);
 postLike(PostsRouter);
 postUnlike(PostsRouter);
 postsGetComments(PostsRouter);
 postsGetLikes(PostsRouter);
+postGetReposts(PostsRouter);
+
+postPin(PostsRouter);
+postPinDelete(PostsRouter);
 
 export { PostsRouter };

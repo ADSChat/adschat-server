@@ -20,7 +20,7 @@ export function postsGet(Router: Router) {
     route
   );
 
-  Router.get('/posts', authenticate(), route);
+  Router.get('/posts', authenticate({ allowBot: true }), route);
 }
 
 interface Param {
@@ -47,15 +47,23 @@ async function route(req: Request, res: Response) {
 
   const isAdmin = isUserAdmin(req.userCache?.badges);
 
+  let limit = query.limit ? parseInt(query.limit) : undefined;
+
+  if (limit && limit < 0) {
+    limit = undefined;
+  }
+
   const posts = await fetchPosts({
     userId: params.userId || req.userCache?.id,
     requesterUserId: req.userCache?.id || '123',
     withReplies: query.withReplies,
+    requesterIpAddress: req.userIP,
     bypassBlocked: isAdmin,
 
-    limit: query.limit ? parseInt(query.limit) : undefined,
+    limit,
     afterId: query.afterId,
     beforeId: query.beforeId,
+    hidePins: true,
   });
 
   res.json(posts);

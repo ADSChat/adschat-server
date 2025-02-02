@@ -31,12 +31,23 @@ export const USER_BADGES = {
     bit: 8,
     color: '#d86f6f',
   },
+  EMO_SUPPORTER: {
+    name: 'Emo Supporter',
+    description: 'Supported this project by donating money',
+    bit: 128,
+  },
   PALESTINE: {
     free: true,
     name: 'Palestine',
     description: 'Palestine',
     bit: 16,
     color: 'linear-gradient(90deg, rgba(224,26,185,1) 0%, rgba(64,122,255,1) 100%);',
+  },
+  MOD: {
+    name: 'Moderator',
+    description: 'Moderator of Nerimity',
+    bit: 64,
+    credit: 'Avatar Border by upklyak on Freepik',
   },
 };
 
@@ -45,11 +56,11 @@ export const isUserAdmin = (badge: number) => {
 };
 
 export const CHANNEL_PERMISSIONS = {
-  PRIVATE_CHANNEL: {
-    name: 'Private Channel',
-    description: 'Disable access to the channel. Server admins can still access the channel.',
+  PUBLIC_CHANNEL: {
+    name: 'Public Channel',
+    description: 'Enable access to the channel. Server admins can access any channel.',
     bit: 1,
-    icon: 'lock',
+    icon: 'public',
   },
   SEND_MESSAGE: {
     name: 'Send Message',
@@ -106,13 +117,15 @@ export const ROLE_PERMISSIONS = {
     name: 'Mention Everyone',
     description: 'mentionEveryoneDescription',
     bit: 64,
-    //icon: 'mention'
   },
   NICKNAME_MEMBER: {
     name: 'Nickname Member',
     description: 'mentionEveryoneDescription',
     bit: 128,
-    //icon: 'mention'
+  },
+  MENTION_ROLES: {
+    name: 'Mention Roles',
+    bit: 256,
   },
 };
 

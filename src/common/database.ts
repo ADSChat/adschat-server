@@ -1,7 +1,24 @@
 import { PrismaClient, Prisma } from '@prisma/client';
+import { Log } from './Log';
+
+// import env from './env';
 
 export const prisma = new PrismaClient({
-  // log: ['error', 'warn', 'info', 'query']
+  // log: ['error', 'warn', 'info', 'query'],
+  log: [
+    'warn',
+    'error',
+    {
+      emit: 'event',
+      level: 'query',
+    },
+  ],
+});
+
+prisma.$on('query', (e) => {
+  if (e.duration >= 3000) {
+    Log.warn('Long Query:', e.duration, 'ms', e.query);
+  }
 });
 
 export const publicUserExcludeFields = excludeFields('User', ['status', 'customStatus', 'lastOnlineAt', 'lastOnlineStatus']);

@@ -38,19 +38,23 @@ import { serverWelcomeQuestionDelete } from './serverWelcomeQuestionDelete';
 import { serverWelcomeAnswer } from './serverWelcomeAnswer';
 import { serverWelcomeAnswerRemove } from './serverWelcomeAnswerRemove';
 import { serverMemberProfileUpdate } from './serveMemberProfileUpdate';
+import { serverAuditLogsGet } from './serverAuditlogsGet';
+import { serverChannelPermissionUpdate } from './serverChannelPermissionsUpdate';
+import { serverTransferOwnership } from './serverTransferOwnership';
 
 const ServersRouter = Router();
 
 serverChannelNoticeDelete(ServersRouter);
 serverChannelNoticeUpdate(ServersRouter);
 
+serverTransferOwnership(ServersRouter);
 serverChannelUpdateOrder(ServersRouter);
 serverUpdateOrder(ServersRouter);
 serverCreate(ServersRouter);
 serverDelete(ServersRouter);
 serverLeave(ServersRouter);
 serverUpdate(ServersRouter);
-
+serverAuditLogsGet(ServersRouter);
 serverInviteJoin(ServersRouter);
 serverInviteDetails(ServersRouter);
 serverInviteCreate(ServersRouter);
@@ -63,6 +67,7 @@ serverChannelCreate(ServersRouter);
 serverRoleUpdateOrder(ServersRouter);
 serverChannelUpdate(ServersRouter);
 serverChannelDelete(ServersRouter);
+serverChannelPermissionUpdate(ServersRouter);
 
 serverRoleCreate(ServersRouter);
 serverRoleUpdate(ServersRouter);

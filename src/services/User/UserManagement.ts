@@ -28,7 +28,11 @@ export async function sendEmailConfirmCode(userId: string) {
     return [{ message: `DEV MODE: Email verify code: ${code}` }, null] as const;
   }
 
-  sendConfirmCodeMail(code, account.email);
+  const result = await sendConfirmCodeMail(code, account.email).catch(() => false);
+
+  if (!result) {
+    return [null, generateError('Failed to send email. Daily limit exceeded.')] as const;
+  }
 
   return [{ message: 'Email confirmation code sent.' }, null] as const;
 }
@@ -58,7 +62,11 @@ export async function sendResetPasswordCode(email: string) {
     return [{ message: `DEV MODE: Password reset link: ${url}` }, null] as const;
   }
 
-  sendResetPasswordMail(url, account.email);
+  const result = await sendResetPasswordMail(url, account.email).catch(() => false);
+
+  if (!result) {
+    return [null, generateError('Failed to send email. Daily limit exceeded.')] as const;
+  }
 
   return [{ message: 'Password reset link sent to your email.' }, null] as const;
 }
@@ -163,7 +171,7 @@ export async function deleteOrLeaveAllServers(userId: string) {
     await setPromiseTimeout(500);
     const server = user.servers[i]!;
     if (server.createdById === userId) {
-      await deleteServer(server.id);
+      await deleteServer(server.id, userId);
       continue;
     }
     await leaveServer(userId, server.id);
@@ -172,13 +180,19 @@ export async function deleteOrLeaveAllServers(userId: string) {
   return [true, null] as const;
 }
 
-export async function deleteAccount(userId: string, bot?: boolean) {
+export interface DeleteAccountOptions {
+  bot?: boolean;
+  deleteContent?: boolean;
+}
+
+export async function deleteAccount(userId: string, opts?: DeleteAccountOptions) {
   const user = await prisma.user.findUnique({
     where: { id: userId },
     select: {
       account: {
         select: { id: true, _count: { select: { applications: true } } },
       },
+      application: { select: { id: true } },
       _count: { select: { servers: true } },
     },
   });
@@ -187,7 +201,11 @@ export async function deleteAccount(userId: string, bot?: boolean) {
     return [null, generateError('Invalid userId.')] as const;
   }
 
-  if (!bot) {
+  if (!user?.application && !user?.account) {
+    return [true, null] as const;
+  }
+
+  if (!opts?.bot) {
     if (user?._count.servers) {
       return [null, generateError('You must leave all servers before deleting your account.')] as const;
     }
@@ -196,7 +214,7 @@ export async function deleteAccount(userId: string, bot?: boolean) {
     }
   }
 
-  await deleteAccountFromDatabase(userId, bot);
+  await deleteAccountFromDatabase(userId, opts);
 
   await removeUserCacheByUserIds([userId]);
 
@@ -205,7 +223,7 @@ export async function deleteAccount(userId: string, bot?: boolean) {
   return [true, null] as const;
 }
 
-const deleteAccountFromDatabase = async (userId: string, bot?: boolean) => {
+const deleteAccountFromDatabase = async (userId: string, opts?: DeleteAccountOptions) => {
   await prisma.$transaction([
     prisma.follower.deleteMany({
       where: {
@@ -220,11 +238,19 @@ const deleteAccountFromDatabase = async (userId: string, bot?: boolean) => {
         avatar: null,
         banner: null,
         badges: 0,
-
         customStatus: null,
-        username: `Deleted ${bot ? 'Bot' : 'User'} ${generateTag()}`,
+        username: `Deleted ${opts?.bot ? 'Bot' : 'User'} ${generateTag()}`,
       },
     }),
+    ...(opts?.deleteContent
+      ? [
+          prisma.scheduleAccountContentDelete.upsert({
+            where: { userId },
+            create: { userId },
+            update: { userId },
+          }),
+        ]
+      : []),
     prisma.account.deleteMany({
       where: { userId },
     }),

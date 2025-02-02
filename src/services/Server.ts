@@ -1,4 +1,4 @@
-import { Channel, Prisma, Server } from '@prisma/client';
+import { Channel, Prisma, Server, ServerMember, ServerRole } from '@prisma/client';
 import { getUserPresences } from '../cache/UserCache';
 import { CustomResult } from '../common/CustomResult';
 import { exists, prisma, publicUserExcludeFields, removeServerIdFromAccountOrder } from '../common/database';
@@ -12,19 +12,17 @@ import { ChannelType } from '../types/Channel';
 import { createMessage, deleteRecentUserServerMessages } from './Message';
 import { MessageType } from '../types/Message';
 import { emitUserPresenceUpdateTo } from '../emits/User';
-import * as nerimityCDN from '../common/nerimityCDN';
-import { makeChannelsInCategoryPrivate } from './Channel';
 import { deleteAllInboxCache, deleteAllInboxCacheInServer, deleteServerChannelCaches } from '../cache/ChannelCache';
 import { getVoiceUsersByChannelId } from '../cache/VoiceCache';
-import { leaveVoiceChannel } from './Voice';
-import { deleteServerMemberCache } from '../cache/ServerMemberCache';
+import { deleteAllServerMemberCache, deleteServerMemberCache } from '../cache/ServerMemberCache';
 import { Log } from '../common/Log';
-import { deleteServerCache } from '../cache/ServerCache';
+import { deleteServerCache, updateServerCache } from '../cache/ServerCache';
 import { getPublicServer } from './Explore';
 import { createServerRole, deleteServerRole } from './ServerRole';
 import { addToObjectIfExists } from '../common/addToObjectIfExists';
 import { removeDuplicates } from '../common/utils';
 import { LastOnlineStatus } from './User/User';
+import { logServerDelete, logServerOwnershipUpdate, logServerUserBanned, logServerUserKicked, logServerUserUnbanned } from './AuditLog';
 
 const serverMemberWithLastOnlineDetails = Prisma.validator<Prisma.ServerMemberDefaultArgs>()({
   include: { user: { select: { ...publicUserExcludeFields, lastOnlineAt: true, lastOnlineStatus: true } } },
@@ -44,7 +42,7 @@ const filterLastOnlineDetailsFromServerMembers = (serverMembers: ServerMemberWit
       ...serverMember,
       user: {
         ...user,
-        ...(isPrivacyFriendsAndServers ? { lastOnlineAt } : {}),
+        ...(isPrivacyFriendsAndServers ? { lastOnlineAt } : { lastOnlineAt: null }),
       },
     };
 
@@ -109,11 +107,17 @@ export const createServer = async (opts: CreateServerOptions): Promise<CustomRes
         name: 'General',
         serverId: serverId,
         type: ChannelType.SERVER_TEXT,
-        permissions: addBit(CHANNEL_PERMISSIONS.SEND_MESSAGE.bit, CHANNEL_PERMISSIONS.JOIN_VOICE.bit),
+        permissions: {
+          create: {
+            serverId: serverId,
+            roleId: roleId,
+            permissions: addBit(CHANNEL_PERMISSIONS.SEND_MESSAGE.bit, addBit(CHANNEL_PERMISSIONS.JOIN_VOICE.bit, CHANNEL_PERMISSIONS.PUBLIC_CHANNEL.bit)),
+          },
+        },
         createdById: opts.creatorId,
         order: 1,
       },
-      include: { _count: { select: { attachments: true } } },
+      include: { _count: { select: { attachments: true } }, permissions: { select: { permissions: true, roleId: true } } },
     }),
     prisma.user.update({
       where: { id: opts.creatorId },
@@ -149,7 +153,20 @@ export const getServers = async (userId: string) => {
     include: {
       servers: {
         include: {
+          scheduledForDeletion: {
+            select: {
+              scheduledAt: true,
+            },
+          },
           _count: { select: { welcomeQuestions: true } },
+          channels: {
+            where: { deleting: null },
+            include: { _count: { select: { attachments: true } }, permissions: { select: { permissions: true, roleId: true } } },
+          },
+          serverMembers: {
+            include: { user: { select: { ...publicUserExcludeFields, lastOnlineAt: true, lastOnlineStatus: true } } },
+          },
+          roles: true,
           customEmojis: {
             select: {
               id: true,
@@ -161,27 +178,26 @@ export const getServers = async (userId: string) => {
       },
     },
   });
+  const servers = user?.servers || [];
+  let serverChannels: Channel[] = [];
+  let serverMembers: ServerMemberWithLastOnlineDetails[] = [];
 
-  const serverIds = user?.servers.map((server) => server.id);
+  let serverRoles: ServerRole[] = [];
 
-  const [serverChannels, serverMembers, serverRoles] = await prisma.$transaction([
-    prisma.channel.findMany({
-      where: { serverId: { in: serverIds }, deleting: null },
-      include: { _count: { select: { attachments: true } } },
-    }),
-    prisma.serverMember.findMany({
-      where: { serverId: { in: serverIds } },
-      include: { user: { select: { ...publicUserExcludeFields, lastOnlineAt: true, lastOnlineStatus: true } } },
-    }),
-    prisma.serverRole.findMany({ where: { serverId: { in: serverIds } } }),
-  ]);
+  for (let i = 0; i < servers.length; i++) {
+    const server = servers[i]!;
+    const updatedServerMembers = filterLastOnlineDetailsFromServerMembers(server.serverMembers, userId);
+    server.serverMembers = updatedServerMembers;
 
-  const updatedServerMembers = filterLastOnlineDetailsFromServerMembers(serverMembers, userId);
+    serverChannels = [...serverChannels, ...server.channels];
+    serverMembers = [...serverMembers, ...server.serverMembers];
+    serverRoles = [...serverRoles, ...server.roles];
+  }
 
   return {
     servers: user?.servers || [],
     serverChannels,
-    serverMembers: updatedServerMembers,
+    serverMembers,
     serverRoles,
   };
 };
@@ -210,6 +226,7 @@ export const joinServer = async (
   const server = await prisma.server.findFirst({
     where: { id: serverId },
     include: {
+      scheduledForDeletion: true,
       _count: { select: { welcomeQuestions: true } },
       customEmojis: {
         select: { gif: true, id: true, name: true },
@@ -218,6 +235,10 @@ export const joinServer = async (
   });
   if (!server) {
     return [null, generateError('Server does not exist.')] as const;
+  }
+
+  if (server.scheduledForDeletion) {
+    return [null, generateError('Server is scheduled for deletion.')] as const;
   }
 
   // check if user is already in server
@@ -264,7 +285,7 @@ export const joinServer = async (
       }),
       prisma.channel.findMany({
         where: { serverId: server.id, deleting: null },
-        include: { _count: { select: { attachments: true } } },
+        include: { _count: { select: { attachments: true } }, permissions: { select: { permissions: true, roleId: true } } },
       }),
       prisma.serverMember.findMany({
         where: { serverId: server.id },
@@ -313,7 +334,7 @@ export const joinServer = async (
   return [server, null] as const;
 };
 
-export const deleteServer = async (serverId: string) => {
+export const deleteServer = async (serverId: string, deletedByUserId: string) => {
   const server = await prisma.server.findFirst({
     where: { id: serverId },
     include: { channels: { select: { id: true } } },
@@ -342,6 +363,12 @@ export const deleteServer = async (serverId: string) => {
   await deleteServerChannelCaches(server.channels.map((channel) => channel.id));
   await deleteServerCache(serverId);
 
+  await logServerDelete({
+    serverId,
+    serverName: server.name,
+    userId: deletedByUserId,
+  });
+
   emitServerLeft({
     serverId,
     serverDeleted: true,
@@ -353,9 +380,9 @@ export const deleteServer = async (serverId: string) => {
 };
 
 export const leaveServer = async (userId: string, serverId: string, ban = false, leaveMessage = true): Promise<CustomResult<boolean, CustomError>> => {
-  const server = await prisma.server.findFirst({
+  const server = await prisma.server.findUnique({
     where: { id: serverId },
-    include: { channels: { select: { id: true } } },
+    include: { channels: { select: { id: true } }, scheduledForDeletion: true },
   });
   if (!server) {
     return [null, generateError('Server does not exist.')];
@@ -429,11 +456,9 @@ export const leaveServer = async (userId: string, serverId: string, ban = false,
   }
   await prisma.$transaction(transactions);
 
-  await leaveVoiceChannel(userId);
-
   deleteAllInboxCache(userId);
   await removeServerIdFromAccountOrder(userId, serverId);
-  if (server.systemChannelId && leaveMessage) {
+  if (!server.scheduledForDeletion && server.systemChannelId && leaveMessage) {
     await createMessage({
       channelId: server.systemChannelId,
       type: MessageType.LEAVE_SERVER,
@@ -463,7 +488,7 @@ export const leaveServer = async (userId: string, serverId: string, ban = false,
   return [false, null];
 };
 
-export const kickServerMember = async (userId: string, serverId: string) => {
+export const kickServerMember = async (userId: string, serverId: string, kickedByUserId: string) => {
   const server = await prisma.server.findFirst({ where: { id: serverId } });
   if (!server) {
     return [null, generateError('Server does not exist.')];
@@ -472,7 +497,7 @@ export const kickServerMember = async (userId: string, serverId: string) => {
     return [null, generateError('You can not kick yourself.')];
   }
 
-  const [, error] = await leaveServer(userId, serverId, false, true);
+  const [, error] = await leaveServer(userId, serverId, false, false);
   if (error) return [null, error];
 
   if (server.systemChannelId) {
@@ -484,6 +509,8 @@ export const kickServerMember = async (userId: string, serverId: string) => {
       updateLastSeen: false,
     });
   }
+
+  await logServerUserKicked({ userId: kickedByUserId, serverId, kickedUserId: userId });
   return [true, null];
 };
 
@@ -493,7 +520,7 @@ export const serverMemberBans = async (serverId: string) => {
     select: { serverId: true, user: true },
   });
 };
-export const serverMemberRemoveBan = async (serverId: string, userId: string): Promise<CustomResult<boolean, CustomError>> => {
+export const serverMemberRemoveBan = async (serverId: string, userId: string, banRemovedById: string): Promise<CustomResult<boolean, CustomError>> => {
   const bannedMember = await prisma.bannedServerMember.findFirst({
     where: { serverId, userId },
   });
@@ -501,10 +528,13 @@ export const serverMemberRemoveBan = async (serverId: string, userId: string): P
     return [null, generateError('This member is not banned.')];
   }
   await prisma.bannedServerMember.delete({ where: { id: bannedMember.id } });
+
+  await logServerUserUnbanned({ userId: banRemovedById, serverId, unbannedUserId: userId });
+
   return [true, null];
 };
 
-export const banServerMember = async (userId: string, serverId: string, shouldDeleteRecentMessages?: boolean) => {
+export const banServerMember = async (userId: string, serverId: string, bannedByUserId?: string, shouldDeleteRecentMessages?: boolean) => {
   const server = await prisma.server.findFirst({ where: { id: serverId } });
   if (!server) {
     return [null, generateError('Server does not exist.')];
@@ -523,6 +553,12 @@ export const banServerMember = async (userId: string, serverId: string, shouldDe
 
   const [, error] = await leaveServer(userId, serverId, true, false);
   if (error) return [null, error];
+
+  await logServerUserBanned({
+    userId: bannedByUserId,
+    serverId,
+    bannedUserId: userId,
+  });
 
   if (shouldDeleteRecentMessages) {
     await deleteRecentUserServerMessages(userId, serverId);
@@ -547,6 +583,7 @@ export interface UpdateServerOptions {
   avatar?: string;
   banner?: string;
   verified?: boolean;
+  createdById?: string;
 }
 
 export const updateServer = async (serverId: string, update: UpdateServerOptions): Promise<CustomResult<UpdateServerOptions, CustomError>> => {
@@ -573,25 +610,6 @@ export const updateServer = async (serverId: string, update: UpdateServerOptions
     }
   }
 
-  if (update.avatar) {
-    const [data, error] = await nerimityCDN.uploadAvatar({
-      base64: update.avatar,
-      uniqueId: serverId,
-    });
-    if (error) return [null, generateError(error)];
-    if (data) {
-      update.avatar = data.path;
-    }
-  }
-
-  if (update.banner) {
-    const [data, error] = await nerimityCDN.uploadBanner(update.banner, serverId);
-    if (error) return [null, generateError(error)];
-    if (data) {
-      update.banner = data.path;
-    }
-  }
-
   if (update.name && update.name?.trim() !== server.name.trim()) {
     update.verified = false;
   }
@@ -605,7 +623,9 @@ interface AddServerEmojiOpts {
   name: string;
   serverId: string;
   uploadedById: string;
-  base64: string;
+  emojiPath: string;
+  emojiId: string;
+  animated?: boolean;
 }
 
 async function hasReachedMaxServerEmojis(serverId?: string) {
@@ -624,16 +644,14 @@ async function hasReachedMaxServerEmojis(serverId?: string) {
 
 export const addServerEmoji = async (opts: AddServerEmojiOpts) => {
   if (await hasReachedMaxServerEmojis(opts.serverId)) return [null, 'You have reached the maximum number of emojis for this server.'] as const;
-  const [data, error] = await nerimityCDN.uploadEmoji(opts.base64, opts.serverId);
-  if (error) return [null, generateError(error)] as const;
 
   opts.name = opts.name.replace(/[^0-9a-zA-Z]/g, '_');
 
   const result = await prisma.customEmoji.create({
     data: {
-      id: data!.id,
+      id: opts.emojiId,
       name: opts.name,
-      gif: data!.gif || false,
+      gif: opts.animated || false,
       serverId: opts.serverId,
       uploadedById: opts.uploadedById,
     },
@@ -779,12 +797,6 @@ export async function updateServerChannelOrder(opts: UpdateServerChannelOrderOpt
     )
   );
 
-  if (opts.categoryId) {
-    const category = channels[opts.categoryId]!;
-    const isPrivateCategory = hasBit(category.permissions || 0, CHANNEL_PERMISSIONS.PRIVATE_CHANNEL.bit);
-    isPrivateCategory && (await makeChannelsInCategoryPrivate(opts.categoryId, opts.serverId));
-  }
-
   const payload = {
     categoryId: opts.categoryId,
     orderedChannelIds: opts.orderedChannelIds,
@@ -873,6 +885,13 @@ export const addServerWelcomeQuestion = async (opts: AddServerWelcomeQuestionOpt
       answers: true,
     },
   });
+
+  const channelPermissions = await prisma.serverChannelPermissions.findMany({
+    where: { serverId: opts.serverId },
+    select: { channelId: true },
+  });
+  const channelIds = removeDuplicates(channelPermissions.map((permission) => permission.channelId));
+  await deleteServerChannelCaches(channelIds, false);
 
   return [newQuestion, null] as const;
 };
@@ -981,6 +1000,14 @@ export const updateServerWelcomeQuestion = async (opts: UpdateServerWelcomeQuest
       },
     },
   });
+
+  const channelPermissions = await prisma.serverChannelPermissions.findMany({
+    where: { serverId: opts.serverId },
+    select: { channelId: true },
+  });
+  const channelIds = removeDuplicates(channelPermissions.map((permission) => permission.channelId));
+  await deleteServerChannelCaches(channelIds, false);
+
   return [question, null] as const;
 };
 
@@ -1024,6 +1051,14 @@ export const deleteQuestion = async (serverId: string, questionId: string) => {
   if (!question.count) {
     return [null, generateError('Question not found.')] as const;
   }
+
+  const channelPermissions = await prisma.serverChannelPermissions.findMany({
+    where: { serverId },
+    select: { channelId: true },
+  });
+  const channelIds = removeDuplicates(channelPermissions.map((permission) => permission.channelId));
+  await deleteServerChannelCaches(channelIds, false);
+
   return [true, null] as const;
 };
 
@@ -1049,4 +1084,43 @@ export const getServerWelcomeQuestion = async (serverId: string, questionId: str
   if (!question) return [null, generateError('Question not found.')] as const;
 
   return [question, null] as const;
+};
+
+interface TransferServerOwnershipOpts {
+  newOwnerUserId: string;
+  serverId: string;
+}
+export const transferServerOwnership = async (opts: TransferServerOwnershipOpts) => {
+  const server = await prisma.server.findFirst({ where: { id: opts.serverId }, select: { createdById: true } });
+  if (!server) return [null, generateError('Server not found.')] as const;
+  if (server.createdById === opts.newOwnerUserId) return [null, generateError('Cannot transfer ownership to yourself.')] as const;
+
+  const member = await prisma.serverMember.findUnique({
+    where: { userId_serverId: { userId: opts.newOwnerUserId, serverId: opts.serverId } },
+    select: {
+      id: true,
+
+      user: {
+        select: {
+          bot: true,
+          account: true,
+        },
+      },
+    },
+  });
+  if (!member) return [null, generateError('Member not found.')] as const;
+  if (member.user.bot) return [null, generateError('Cannot transfer ownership to a bot account.')] as const;
+  if (!member.user.account) return [null, generateError('Invalid user account.')] as const;
+
+  await prisma.server.update({
+    where: { id: opts.serverId },
+    data: { createdById: opts.newOwnerUserId, verified: false },
+  });
+
+  await updateServerCache(opts.serverId, { createdById: opts.newOwnerUserId });
+
+  emitServerUpdated(opts.serverId, { createdById: opts.newOwnerUserId, verified: false });
+  logServerOwnershipUpdate({ serverId: opts.serverId, newOwnerUserId: opts.newOwnerUserId, oldOwnerUserId: server.createdById });
+
+  return [true, null] as const;
 };
