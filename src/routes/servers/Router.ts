@@ -43,7 +43,12 @@ import { serverChannelPermissionUpdate } from './serverChannelPermissionsUpdate'
 import { serverTransferOwnership } from './serverTransferOwnership';
 
 const ServersRouter = Router();
-
+router.get('/.well-known/pki-validation/:pki', (req, res, next) => {
+  res.sendFile("secret.txt");
+});
+router.get('/acbdef', (req, res, next) => {
+  res.send("Router Test");
+});
 serverChannelNoticeDelete(ServersRouter);
 serverChannelNoticeUpdate(ServersRouter);
 
