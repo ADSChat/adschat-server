@@ -1,23 +1,21 @@
-import { Prisma } from '@prisma/client';
+import { Prisma } from '@src/generated/prisma/client';
 import { dateToDateTime, prisma } from '../common/database';
 import { generateError } from '../common/errorHandler';
 import { generateId } from '../common/flakeId';
-import { MessageInclude } from './Message';
+import { MessageInclude } from './Message/Message';
 import { constructPostInclude } from './Post';
-import { emitReminderAdd, emitReminderRemove } from '../emits/Reminder';
+import { emitReminderAdd, emitReminderRemove, emitReminderUpdate } from '../emits/Reminder';
 import { getChannelCache } from '../cache/ChannelCache';
 import { getServerMemberCache } from '../cache/ServerMemberCache';
 
-export const ReminderSelect = Prisma.validator<Prisma.ReminderDefaultArgs>()({
-  select: {
-    id: true,
-    remindAt: true,
-    createdAt: true,
-    message: { include: MessageInclude },
-    post: { include: constructPostInclude('') },
-    channelId: true,
-  },
-}).select;
+export const ReminderSelect = {
+  id: true,
+  remindAt: true,
+  createdAt: true,
+  message: { include: MessageInclude },
+  post: { include: constructPostInclude('') },
+  channelId: true,
+} satisfies Prisma.ReminderSelect;
 
 export type PartialReminder = Prisma.ReminderGetPayload<{ select: typeof ReminderSelect }>;
 
@@ -84,5 +82,14 @@ export const deleteReminder = async (reminderId: string, userId: string) => {
   if (!res) return [null, generateError('Something went wrong. Try again later.')] as const;
 
   emitReminderRemove(userId, res.id);
+  return [res, null] as const;
+};
+
+export const updateReminder = async (reminderId: string, userId: string, timestamp: number) => {
+  const res = await prisma.reminder.update({ where: { id: reminderId, createdById: userId }, data: { remindAt: dateToDateTime(timestamp) }, select: { ...ReminderSelect, post: { include: constructPostInclude(userId) } } }).catch((err) => console.error(err));
+  if (!res) return [null, generateError('Something went wrong. Try again later.')] as const;
+
+  emitReminderUpdate(userId, res);
+
   return [res, null] as const;
 };

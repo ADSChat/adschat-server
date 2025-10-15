@@ -28,10 +28,20 @@ import { getUsersAuditLog } from './getUsersAuditLog';
 import { getMessages } from './getMessages';
 import { serverUndoDelete } from './serverUndoDelete';
 import { searchAuditLogs } from './searchAuditLogs';
+import { exploreServerPinRemove } from './exploreServerPinRemove';
+import { exploreServerPin } from './exploreServerPin';
+import { userBatchShadowBan } from './userBatchShadowBan';
+import { userBatchUndoShadowBan } from './userBatchUndoShadowBan';
 
 const ModerationRouter = Router();
 
+exploreServerPinRemove(ModerationRouter);
+exploreServerPin(ModerationRouter);
+
 getMessages(ModerationRouter);
+
+userBatchUndoShadowBan(ModerationRouter);
+userBatchShadowBan(ModerationRouter);
 
 userBatchWarn(ModerationRouter);
 

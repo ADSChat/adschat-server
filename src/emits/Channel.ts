@@ -1,11 +1,11 @@
-import { Channel, Message, User } from '@prisma/client';
+import { Channel, Message, User } from '@src/generated/prisma/client';
 import { BaseChannelCache, ChannelCache, DMChannelCache, InboxCache } from '../cache/ChannelCache';
 import { UserCache } from '../cache/UserCache';
-import { CHANNEL_TYPING, MESSAGE_BUTTON_CLICKED, MESSAGE_BUTTON_CLICKED_CALLBACK, MESSAGE_CREATED, MESSAGE_DELETED, MESSAGE_REACTION_ADDED, MESSAGE_REACTION_REMOVED, MESSAGE_UPDATED, SERVER_CHANNEL_CREATED, SERVER_CHANNEL_DELETED, SERVER_CHANNEL_UPDATED } from '../common/ClientEventNames';
+import { CHANNEL_TYPING, MESSAGE_BUTTON_CLICKED, MESSAGE_BUTTON_CLICKED_CALLBACK, MESSAGE_CREATED, MESSAGE_DELETED, MESSAGE_MARK_UNREAD, MESSAGE_REACTION_ADDED, MESSAGE_REACTION_REMOVED, MESSAGE_UPDATED, SERVER_CHANNEL_CREATED, SERVER_CHANNEL_DELETED, SERVER_CHANNEL_UPDATED } from '../common/ClientEventNames';
 import { UpdateServerChannelOptions } from '../services/Channel';
 import { getIO } from '../socket/socket';
 
-export const emitDMMessageCreated = (channel: BaseChannelCache & DMChannelCache, message: Message & { createdBy: Partial<UserCache | User> }, socketId?: string) => {
+export const emitDMMessageCreated = (channel: BaseChannelCache & DMChannelCache, message: Message & { createdBy: null | Partial<UserCache | User> }, socketId?: string) => {
   const io = getIO();
 
   const userIds = [channel.inbox?.recipientId as string, channel.inbox?.createdById as string];
@@ -30,6 +30,16 @@ export const emitDMMessageUpdated = (channel: BaseChannelCache & DMChannelCache,
     updated,
   });
 };
+
+export const emitMessageMarkUnread = (userId: string, channelId: string, at: number) => {
+  const io = getIO();
+
+  io.in(userId).emit(MESSAGE_MARK_UNREAD, {
+    channelId,
+    at,
+  });
+};
+
 export const emitDMMessageReactionAdded = (channel: BaseChannelCache & DMChannelCache, reaction: any) => {
   const io = getIO();
 

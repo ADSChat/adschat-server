@@ -1,3 +1,4 @@
+import { Account, Inbox, User } from '@src/generated/prisma/client';
 import { addBit, CHANNEL_PERMISSIONS, hasBit } from '../common/Bitwise';
 import { prisma } from '../common/database';
 import { redisClient } from '../common/redis';
@@ -39,10 +40,14 @@ export interface BaseChannelCache {
 
 export type ChannelCache = BaseChannelCache & (ServerChannelCache | DMChannelCache | TicketChannelCache);
 
+type CanMessageError = 'BLOCKED_BY_REQUESTER' | 'BLOCKED_BY_RECIPIENT' | 'NOT_FRIENDS_REQUESTER' | 'NOT_FRIENDS_RECIPIENT' | 'NOT_FRIENDS_AND_SERVERS_REQUESTER' | 'NOT_FRIENDS_AND_SERVERS_RECIPIENT' | 'UNKNOWN';
+
 export interface InboxCache {
   recipientId: string;
   createdById: string;
   canMessage: boolean;
+  canMessageError: CanMessageError | null;
+  recipient: { bot: boolean | null };
 }
 
 const setServerChannelMemberPermissions = async (serverId: string, channelId: string, userId: string) => {
@@ -124,12 +129,12 @@ const getServerChannelMemberPermissions = async (serverId: string, channelId: st
   return setServerChannelMemberPermissions(serverId, channelId, userId);
 };
 
-export const getChannelCache = async (channelId: string, userId: string) => {
+export const getChannelCache = async (channelId: string, userId?: string) => {
   // Check server channel in cache.
   const serverChannel = await getServerChannelCache(channelId);
   if (serverChannel) {
     const server = await getServerCache(serverChannel.serverId as string);
-    const [permissions, error] = await getServerChannelMemberPermissions(serverChannel.serverId as string, channelId, userId);
+    const [permissions, error] = !userId ? [0, null] : await getServerChannelMemberPermissions(serverChannel.serverId as string, channelId, userId);
     if (error) return [null, error] as const;
 
     return [{ ...serverChannel, server, permissions } as ChannelCache, null] as const;
@@ -138,6 +143,7 @@ export const getChannelCache = async (channelId: string, userId: string) => {
   // Check DM channel in cache.
   const dmChannel = await getDMChannelCache(channelId);
   if (dmChannel) {
+    if (!userId) return [null, 'User not found.'] as const;
     const inbox = await getInboxCache(channelId, userId);
     if (!inbox) return [null, 'Inbox not found.'] as const;
     return [{ ...dmChannel, inbox } as ChannelCache, null] as const;
@@ -152,7 +158,7 @@ export const getChannelCache = async (channelId: string, userId: string) => {
   return await addChannelToCache(channelId, userId);
 };
 
-const addChannelToCache = async (channelId: string, userId: string) => {
+const addChannelToCache = async (channelId: string, userId?: string) => {
   // If not in cache, fetch from database.
   const channel = await prisma.channel.findUnique({
     where: { id: channelId, deleting: null },
@@ -171,6 +177,7 @@ const addChannelToCache = async (channelId: string, userId: string) => {
 
   if (channel.serverId) {
     const server = await getServerCache(channel.serverId);
+    if (!server) return [null, 'Server does not exist.'] as const;
 
     const defaultRoleId = server?.defaultRoleId;
     const defaultPerm = channel.permissions.find((p) => p.roleId === defaultRoleId);
@@ -193,7 +200,7 @@ const addChannelToCache = async (channelId: string, userId: string) => {
     const stringifiedChannel = JSON.stringify({ ...channel, canBePublic });
     await redisClient.set(SERVER_CHANNEL_KEY_STRING(channelId), stringifiedChannel);
 
-    const [permissions, error] = await getServerChannelMemberPermissions(channel.serverId as string, channelId, userId);
+    const [permissions, error] = !userId ? [0, null] : await getServerChannelMemberPermissions(channel.serverId as string, channelId, userId);
     if (error) return [null, error] as const;
 
     return [
@@ -263,6 +270,101 @@ export const deleteServerChannelCaches = async (channelIds: string[], alsoDelete
   await multi.exec();
 };
 
+interface FetchCanMessageOpts {
+  userId: string;
+  inbox: {
+    recipientId: string;
+    recipient: {
+      account: {
+        dmStatus: DmStatus;
+      } | null;
+    };
+    createdBy: {
+      account: {
+        dmStatus: DmStatus;
+      } | null;
+    };
+  };
+}
+
+const fetchCanMssage = async ({ userId, inbox }: FetchCanMessageOpts): Promise<[boolean, CanMessageError | null]> => {
+  if (inbox.recipientId === userId) return [true, null] as const; // saved notes
+
+  const requesterDmStatus = inbox.createdBy.account?.dmStatus || 0;
+  const recipientDmStatus = inbox.recipient.account?.dmStatus || 0;
+
+  const blockedRelations = await prisma.friend.findMany({
+    where: {
+      status: FriendStatus.BLOCKED,
+      OR: [
+        { recipientId: inbox.recipientId, userId },
+        { recipientId: userId, userId: inbox.recipientId },
+      ],
+    },
+  });
+  if (blockedRelations.length) {
+    if (blockedRelations.length === 2) {
+      return [false, 'BLOCKED_BY_REQUESTER'] as const;
+    }
+    if (blockedRelations[0]?.userId === userId) {
+      return [false, 'BLOCKED_BY_REQUESTER'] as const;
+    }
+    return [false, 'BLOCKED_BY_RECIPIENT'] as const;
+  }
+  if (!requesterDmStatus && !recipientDmStatus) return [true, null] as const;
+
+  const areFriends = await prisma.friend.findFirst({
+    where: {
+      OR: [
+        { userId, recipientId: inbox.recipientId },
+        { userId: inbox.recipientId, recipientId: userId },
+      ],
+
+      status: FriendStatus.FRIENDS,
+    },
+  });
+
+  if (areFriends) {
+    return [true, null] as const;
+  }
+  if (requesterDmStatus === DmStatus.FRIENDS) {
+    console.log({
+      what: 'NOT_FRIENDS_REQUESTER',
+      recipientId: inbox.recipientId,
+      requesterId: userId,
+      areFriends,
+    });
+    return [false, 'NOT_FRIENDS_REQUESTER'] as const;
+  }
+  if (recipientDmStatus === DmStatus.FRIENDS) {
+    console.log({
+      what: 'NOT_FRIENDS_RECIPIENT',
+      recipientId: inbox.recipientId,
+      requesterId: userId,
+      areFriends,
+    });
+    return [false, 'NOT_FRIENDS_RECIPIENT'] as const;
+  }
+
+  if (requesterDmStatus === DmStatus.FRIENDS_AND_SERVERS || recipientDmStatus === DmStatus.FRIENDS_AND_SERVERS) {
+    const doesShareServers = await prisma.server.findFirst({
+      where: {
+        AND: [{ serverMembers: { some: { userId: inbox.recipientId } } }, { serverMembers: { some: { userId } } }],
+      },
+    });
+    if (doesShareServers) {
+      return [true, null] as const;
+    }
+  }
+  if (requesterDmStatus === DmStatus.FRIENDS_AND_SERVERS) {
+    return [false, 'NOT_FRIENDS_AND_SERVERS_REQUESTER'] as const;
+  }
+  if (recipientDmStatus === DmStatus.FRIENDS_AND_SERVERS) {
+    return [false, 'NOT_FRIENDS_AND_SERVERS_RECIPIENT'] as const;
+  }
+  return [false, 'UNKNOWN'] as const;
+};
+
 const getInboxCache = async (channelId: string, userId: string) => {
   const cachedInboxStr = await redisClient.get(INBOX_KEY_STRING(channelId, userId));
   if (cachedInboxStr) {
@@ -286,6 +388,7 @@ const getInboxCache = async (channelId: string, userId: string) => {
       },
       recipient: {
         select: {
+          bot: true,
           account: {
             select: {
               dmStatus: true,
@@ -297,52 +400,13 @@ const getInboxCache = async (channelId: string, userId: string) => {
   });
   if (!inbox) return null;
 
-  let canMessage = true;
-  if (inbox.recipientId !== userId) {
-    // saved notes
-    const requesterDmStatus = inbox.createdBy.account?.dmStatus;
-    const recipientDmStatus = inbox.recipient.account?.dmStatus;
-
-    const blocked = await prisma.friend.findFirst({
-      where: {
-        status: FriendStatus.BLOCKED,
-        OR: [
-          { recipientId: inbox.recipientId, userId },
-          { recipientId: userId, userId: inbox.recipientId },
-        ],
-      },
-    });
-    if (blocked) {
-      canMessage = false;
-    }
-
-    if (!blocked && (requesterDmStatus || recipientDmStatus)) {
-      canMessage = false;
-      const areFriends = await prisma.friend.findFirst({
-        where: {
-          status: FriendStatus.FRIENDS,
-          recipientId: inbox.recipientId,
-          userId,
-        },
-      });
-
-      canMessage = !!areFriends;
-
-      if ((!areFriends && requesterDmStatus === DmStatus.FRIENDS_AND_SERVERS && recipientDmStatus === DmStatus.FRIENDS_AND_SERVERS) || (requesterDmStatus === DmStatus.FRIENDS_AND_SERVERS && recipientDmStatus === DmStatus.OPEN) || (recipientDmStatus === DmStatus.FRIENDS_AND_SERVERS && requesterDmStatus === DmStatus.OPEN)) {
-        const doesShareServers = await prisma.server.findFirst({
-          where: {
-            AND: [{ serverMembers: { some: { userId: inbox.recipientId } } }, { serverMembers: { some: { userId } } }],
-          },
-        });
-        canMessage = !!doesShareServers;
-      }
-    }
-  }
+  const [canMessage, canMessageError] = await fetchCanMssage({ inbox, userId });
 
   const stringifiedInbox = JSON.stringify({
     ...inbox,
     canMessage,
-    recipient: undefined,
+    ...(canMessageError ? { canMessageError } : {}),
+    recipient: { bot: inbox.recipient.bot },
   });
   await redisClient.set(INBOX_KEY_STRING(channelId, userId), stringifiedInbox);
 

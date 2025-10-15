@@ -1,34 +1,19 @@
 import { Request, Response, Router } from 'express';
 import { authenticate } from '../../middleware/authenticate';
 import { channelVerification } from '../../middleware/channelVerification';
-import { addMessageReaction } from '../../services/Message';
+import { addMessageReaction } from '../../services/Message/Message';
 import { body } from 'express-validator';
-import { customExpressValidatorResult } from '../../common/errorHandler';
+import { customExpressValidatorResult, generateError } from '../../common/errorHandler';
 import { rateLimit } from '../../middleware/rateLimit';
 
 export function channelMessageReactionsAdd(Router: Router) {
   Router.post(
     '/channels/:channelId/messages/:messageId/reactions',
-    authenticate({allowBot: true}),
+    authenticate({ allowBot: true }),
     channelVerification(),
-    body('name')
-      .not()
-      .isEmpty()
-      .withMessage('name is required!')
-      .isString()
-      .withMessage('name must be a string!')
-      .isLength({ min: 1, max: 20 })
-      .withMessage('name length must be between 1 and 20 characters.'),
-    body('emojiId')
-      .optional({ values: 'falsy' })
-      .isString()
-      .withMessage('emojiId must be a string!')
-      .isLength({ min: 1, max: 20 })
-      .withMessage('emojiId length must be between 1 and 20 characters.'),
-    body('gif')
-      .optional({ values: 'falsy' })
-      .isBoolean()
-      .withMessage('gif must be a boolean!'),
+    body('name').not().isEmpty().withMessage('name is required!').isString().withMessage('name must be a string!').isLength({ min: 1, max: 20 }).withMessage('name length must be between 1 and 20 characters.'),
+    body('emojiId').optional({ values: 'falsy' }).isString().withMessage('emojiId must be a string!').isLength({ min: 1, max: 20 }).withMessage('emojiId length must be between 1 and 20 characters.'),
+    body('gif').optional({ values: 'falsy' }).isBoolean().withMessage('gif must be a boolean!'),
     rateLimit({
       name: 'reaction_add',
       restrictMS: 20000,
@@ -45,6 +30,9 @@ interface Body {
 }
 
 async function route(req: Request, res: Response) {
+  if (req.userCache.shadowBanned) {
+    return res.status(403).json(generateError('Something went wrong. Try again later.'));
+  }
   const body = req.body as Body;
   const { messageId } = req.params;
 
@@ -56,6 +44,10 @@ async function route(req: Request, res: Response) {
 
   if (!body.name) {
     return res.status(403).json('Name is required!');
+  }
+
+  if (!req.userCache.application && !req.userCache.account?.emailConfirmed) {
+    return res.status(400).json(generateError('You must confirm your email to react to messages.'));
   }
 
   const [response, err] = await addMessageReaction({

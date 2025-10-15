@@ -41,8 +41,35 @@ import { serverMemberProfileUpdate } from './serveMemberProfileUpdate';
 import { serverAuditLogsGet } from './serverAuditlogsGet';
 import { serverChannelPermissionUpdate } from './serverChannelPermissionsUpdate';
 import { serverTransferOwnership } from './serverTransferOwnership';
+import { serverBotCommandsGet } from './serverBotCommandsGet';
+import { serverExternalEmbedGet } from './serverExternalEmbedGet';
+import { serverExternalEmbedCreate } from './serverExternalEmbedCreate';
+import { serverExternalEmbedDelete } from './serverExternalEmbedDelete';
+import { serverExternalEmbedRawGet } from './serverExternalEmbedRawGet ';
+import { serverFolderCreate } from './serverFolderCreate';
+import { serverFolderUpdate } from './serverFolderUpdate';
+import { serverChannelWebhookGet } from './serverChannelWebhookGet';
+import { serverChannelWebhookToken } from './serverChannelWebhookGetToken';
+import { serverChannelWebhookCreate } from './serverChannelWebhookCreate';
+import { serverChannelWebhookDelete } from './serverChannelWebhookDelete';
+import { serverChannelWebhookGetSingle } from './serverChannelWebhookGetSingle';
+import { serverChannelWebhookUpdate } from './serverChannelWebhookUpdate';
 
 const ServersRouter = Router();
+
+serverChannelWebhookUpdate(ServersRouter);
+serverChannelWebhookGetSingle(ServersRouter);
+serverChannelWebhookGet(ServersRouter);
+serverChannelWebhookCreate(ServersRouter);
+serverChannelWebhookToken(ServersRouter);
+serverChannelWebhookDelete(ServersRouter);
+
+serverExternalEmbedGet(ServersRouter);
+serverExternalEmbedRawGet(ServersRouter);
+serverExternalEmbedCreate(ServersRouter);
+serverExternalEmbedDelete(ServersRouter);
+
+serverBotCommandsGet(ServersRouter);
 
 serverChannelNoticeDelete(ServersRouter);
 serverChannelNoticeUpdate(ServersRouter);
@@ -50,6 +77,8 @@ serverChannelNoticeUpdate(ServersRouter);
 serverTransferOwnership(ServersRouter);
 serverChannelUpdateOrder(ServersRouter);
 serverUpdateOrder(ServersRouter);
+serverFolderCreate(ServersRouter);
+serverFolderUpdate(ServersRouter);
 serverCreate(ServersRouter);
 serverDelete(ServersRouter);
 serverLeave(ServersRouter);

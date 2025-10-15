@@ -1,4 +1,4 @@
-import { Post, Prisma } from '@prisma/client';
+import { Post, Prisma } from '@src/generated/prisma/client';
 import { CustomResult } from '../common/CustomResult';
 import { dateToDateTime, prisma, publicUserExcludeFields } from '../common/database';
 import { CustomError, generateError } from '../common/errorHandler';
@@ -8,6 +8,42 @@ import { FriendStatus } from '../types/Friend';
 import { getBlockedUserIds, isUserBlocked } from './User/User';
 import { replaceBadWords } from '../common/badWords';
 import { addPostViewsToCache } from '../cache/PostViewsCache';
+import { removeDuplicates } from '../common/utils';
+import { emitPostMentions } from '../emits/PostEmits';
+import { getOGTags } from '../common/OGTags';
+
+const userMentionRegex = /@([^@:]+):([a-zA-Z0-9]+)/g;
+
+const formatContent = async (content: string) => {
+  const mentions = [...content.matchAll(userMentionRegex)];
+
+  if (!mentions.length) return { newContent: content, mentions: [], mentionUserIds: [] };
+
+  const users = await prisma.user.findMany({
+    where: {
+      OR: [
+        ...mentions.map((mention) => ({
+          AND: [{ username: mention[1] }, { tag: mention[2] }],
+        })),
+      ],
+      NOT: { AND: [{ application: null }, { account: null }] },
+    },
+    select: {
+      username: true,
+      tag: true,
+      id: true,
+    },
+  });
+
+  const newContent = content.replace(userMentionRegex, (match, username, tag) => {
+    const user = users.find((user) => user.username === username && user.tag === tag);
+    if (!user) {
+      return match;
+    }
+    return `[@:${user.id}]`;
+  });
+  return { newContent, mentionUserIds: removeDuplicates(users.map((user) => user.id)), mentions: users };
+};
 
 export function constructPostInclude(requesterUserId: string, continueIter = true): Prisma.PostInclude | null | undefined {
   return {
@@ -29,10 +65,11 @@ export function constructPostInclude(requesterUserId: string, continueIter = tru
         },
       },
     },
+    mentions: { select: { id: true, username: true, tag: true, hexColor: true, avatar: true, badges: true } },
     ...(continueIter ? { commentTo: { include: constructPostInclude(requesterUserId, false) } } : undefined),
     createdBy: { select: publicUserExcludeFields },
     _count: {
-      select: { likedBy: true, comments: { where: { deleted: null } }, reposts: true },
+      select: { likedBy: true, comments: { where: { deleted: false } }, reposts: true },
     },
     likedBy: { select: { id: true }, where: { likedById: requesterUserId } },
     attachments: {
@@ -40,16 +77,16 @@ export function constructPostInclude(requesterUserId: string, continueIter = tru
     },
     reposts: {
       where: {
-        OR: [
-          { createdById: requesterUserId },
-          {
-            createdBy: {
+        createdBy: {
+          OR: [
+            { id: requesterUserId },
+            {
               followers: {
                 some: { followedById: requesterUserId },
               },
             },
-          },
-        ],
+          ],
+        },
       },
       select: { id: true, createdBy: { select: { id: true, username: true } } },
     },
@@ -62,6 +99,8 @@ export function constructPostInclude(requesterUserId: string, continueIter = tru
       : {}),
   };
 }
+
+const urlRegex = new RegExp('(^|[ \t\r\n])((http|https):(([A-Za-z0-9$_.+!*(),;/?:@&~=-])|%[A-Fa-f0-9]{2}){2,}(#([a-zA-Z0-9][a-zA-Z0-9$_.+!*(),;/?:@&~=%-]*))?([A-Za-z0-9$_+!*();/?:~-]))');
 
 interface CreatePostOpts {
   userId: string;
@@ -84,11 +123,18 @@ export async function createPost(opts: CreatePostOpts) {
     }
   }
 
+  const formattedContent = await formatContent(opts.content?.trim() || '');
+
+  const url = opts.content?.match(urlRegex)?.[0].trim();
+  const OGTags = url ? await getOGTags(url).catch(() => {}) : undefined;
+
   const post = await prisma.post.create({
     data: {
       id: generateId(),
-      content: opts.content ? replaceBadWords(opts.content?.trim()) : undefined,
+      content: opts.content ? replaceBadWords(formattedContent.newContent) : undefined,
+      mentions: { connect: formattedContent.mentionUserIds.map((id) => ({ id })) },
       createdById: opts.userId,
+      ...(OGTags ? { embed: OGTags } : {}),
       ...(opts.commentToId ? { commentToId: opts.commentToId } : undefined),
       ...(opts.attachment
         ? {
@@ -119,6 +165,28 @@ export async function createPost(opts: CreatePostOpts) {
     include: constructPostInclude(opts.userId),
   });
 
+  if (formattedContent.mentionUserIds.length) {
+    const blockedUsers = await prisma.friend.findMany({
+      where: {
+        status: FriendStatus.BLOCKED,
+        OR: [
+          { recipientId: { in: formattedContent.mentionUserIds }, userId: opts.userId },
+          { recipientId: opts.userId, userId: { in: formattedContent.mentionUserIds } },
+        ],
+      },
+    });
+
+    const toIds = formattedContent.mentionUserIds.filter((id) => !blockedUsers.find((b) => b.userId === id || b.recipientId === id));
+
+    emitPostMentions(toIds, post);
+
+    createPostNotification({
+      byId: opts.userId,
+      postId: post.id,
+      toId: toIds,
+      type: PostNotificationType.MENTIONED,
+    });
+  }
   if (opts.commentToId) {
     createPostNotification({
       byId: opts.userId,
@@ -132,16 +200,23 @@ export async function createPost(opts: CreatePostOpts) {
 
 export async function editPost(opts: { editById: string; postId: string; content: string }) {
   const post = await prisma.post.findFirst({
-    where: { createdById: opts.editById, deleted: null, id: opts.postId, repostId: null },
+    where: { createdById: opts.editById, deleted: false, id: opts.postId, repostId: null },
     select: { id: true },
   });
   if (!post) return [null, generateError('Post not found')] as const;
+
+  const formattedContent = await formatContent(opts.content?.trim() || '');
+
+  const url = opts.content?.match(urlRegex)?.[0].trim();
+  const OGTags = url ? (await getOGTags(url).catch(() => {})) || Prisma.JsonNull : Prisma.JsonNull;
 
   const newPost = await prisma.post
     .update({
       where: { id: opts.postId },
       data: {
-        content: replaceBadWords(opts.content?.trim()),
+        content: replaceBadWords(formattedContent.newContent),
+        mentions: { connect: formattedContent.mentionUserIds.map((id) => ({ id })) },
+        embed: OGTags,
 
         editedAt: dateToDateTime(),
       },
@@ -156,7 +231,7 @@ export async function editPost(opts: { editById: string; postId: string; content
 
 export async function getPostLikes(postId: string) {
   const post = await prisma.post.findFirst({
-    where: { deleted: null, id: postId },
+    where: { deleted: false, id: postId },
     select: { id: true },
   });
   if (!post) return [null, generateError('Post not found')] as const;
@@ -172,7 +247,7 @@ export async function getPostLikes(postId: string) {
 
 export async function getPostReposts(postId: string) {
   const post = await prisma.post.findFirst({
-    where: { deleted: null, id: postId },
+    where: { deleted: false, id: postId },
     select: { id: true },
   });
   if (!post) return [null, generateError('Post not found')] as const;
@@ -244,7 +319,7 @@ export async function fetchPosts(opts: FetchPostsOpts) {
           },
         }
       : undefined),
-    deleted: null,
+    deleted: false,
   } as Prisma.PostWhereUniqueInput;
 
   const posts = await prisma.post.findMany({
@@ -315,7 +390,7 @@ export async function fetchLatestPost(opts: fetchLatestPostOpts) {
   const post = await prisma.post.findFirst({
     orderBy: { createdAt: 'desc' },
     where: {
-      deleted: null,
+      deleted: false,
       commentToId: null,
       createdById: opts.userId,
       ...(!opts.bypassBlocked
@@ -380,12 +455,10 @@ interface FetchPostOpts {
 }
 
 export async function fetchPost(opts: FetchPostOpts) {
-  const post = await prisma.post.findFirst({
+  const post = await prisma.post.findUnique({
     where: {
       id: opts.postId,
     },
-    orderBy: { createdAt: 'desc' },
-    take: 50,
     include: constructPostInclude(opts.requesterUserId),
   });
   if (!post) return null;
@@ -408,7 +481,7 @@ export async function fetchPost(opts: FetchPostOpts) {
 
 export async function likePost(userId: string, postId: string): Promise<CustomResult<Post, CustomError>> {
   const post = await prisma.post.findFirst({
-    where: { deleted: null, id: postId, repostId: null },
+    where: { deleted: false, id: postId, repostId: null },
   });
   if (!post) return [null, generateError('Post not found')];
 
@@ -533,6 +606,8 @@ interface GetFeedOpts {
 }
 
 export async function getFeed(opts: GetFeedOpts) {
+  const following = await prisma.follower.findMany({ where: { followedById: opts.userId }, select: { followedToId: true } });
+
   const feedPosts = await prisma.post.findMany({
     orderBy: { createdAt: 'desc' },
     where: {
@@ -541,22 +616,25 @@ export async function getFeed(opts: GetFeedOpts) {
 
       NOT: {
         repost: {
-          deleted: { not: null },
+          deleted: { not: false },
         },
       },
 
       commentTo: null,
-      deleted: null,
-      OR: [
-        { createdById: opts.userId },
-        {
-          createdBy: {
-            followers: {
-              some: { followedById: opts.userId },
-            },
-          },
-        },
-      ],
+      deleted: false,
+      createdById: {
+        in: [opts.userId, ...following.map((f) => f.followedToId)],
+      },
+      // createdBy: {
+      //   OR: [
+      //     { id: opts.userId },
+      //     {
+      //       followers: {
+      //         some: { followedById: opts.userId },
+      //       },
+      //     },
+      //   ],
+      // },
     },
     include: constructPostInclude(opts.userId),
     take: opts.limit ? (opts.limit > 30 ? 30 : opts.limit) : 30,
@@ -571,10 +649,11 @@ export enum PostNotificationType {
   REPLIED = 1,
   FOLLOWED = 2,
   REPOSTED = 3,
+  MENTIONED = 4,
 }
 
 interface CreatePostNotificationProps {
-  toId?: string;
+  toId?: string | string[];
   byId: string;
   postId?: string;
   type: PostNotificationType;
@@ -583,51 +662,64 @@ interface CreatePostNotificationProps {
 export async function createPostNotification(opts: CreatePostNotificationProps) {
   let toId = opts.toId;
 
-  if (opts.type === PostNotificationType.LIKED || opts.type === PostNotificationType.REPLIED || opts.type === PostNotificationType.REPOSTED) {
-    const post = await prisma.post.findFirst({
-      where: { id: opts.postId },
-      select: { createdById: true },
+  if (!Array.isArray(toId)) {
+    if (opts.type === PostNotificationType.LIKED || opts.type === PostNotificationType.REPLIED || opts.type === PostNotificationType.REPOSTED) {
+      const post = await prisma.post.findFirst({
+        where: { id: opts.postId },
+        select: { createdById: true },
+      });
+      if (!post) return;
+      toId = post.createdById;
+    }
+
+    if (opts.type === PostNotificationType.REPLIED) {
+      const post = await prisma.post.findFirst({
+        where: { id: opts.postId },
+        select: { commentTo: { select: { createdById: true } } },
+      });
+      if (!post) return;
+      toId = post.commentTo?.createdById;
+    }
+
+    if (!toId) return;
+
+    if (toId === opts.byId) return;
+
+    const alreadyExists = await prisma.postNotification.findFirst({
+      where: {
+        byId: opts.byId,
+        toId: toId,
+        type: opts.type,
+        postId: opts.postId,
+      },
     });
-    if (!post) return;
-    toId = post.createdById;
+    if (alreadyExists) return;
   }
 
-  if (opts.type === PostNotificationType.REPLIED) {
-    const post = await prisma.post.findFirst({
-      where: { id: opts.postId },
-      select: { commentTo: { select: { createdById: true } } },
-    });
-    if (!post) return;
-    toId = post.commentTo?.createdById;
-  }
+  let toIdArray = Array.isArray(toId) ? toId : [toId].filter((toId) => toId !== opts.byId);
+  if (toIdArray.length === 0) return;
 
-  if (!toId) return;
-
-  if (toId === opts.byId) return;
-
-  const alreadyExists = await prisma.postNotification.findFirst({
-    where: {
-      byId: opts.byId,
-      toId: toId,
-      type: opts.type,
-      postId: opts.postId,
-    },
+  const nonBotUsers = await prisma.user.findMany({
+    where: { bot: null, id: { in: toIdArray } },
+    select: { id: true },
   });
-  if (alreadyExists) return;
+
+  toIdArray = nonBotUsers.map((user) => user.id);
+  if (toIdArray.length === 0) return;
 
   await prisma
     .$transaction([
-      prisma.postNotification.create({
-        data: {
+      prisma.postNotification.createMany({
+        data: toIdArray.map((toId) => ({
           id: generateId(),
           byId: opts.byId,
           toId: toId,
           type: opts.type,
           postId: opts.postId,
-        },
+        })),
       }),
-      prisma.account.update({
-        where: { userId: toId },
+      prisma.account.updateMany({
+        where: { userId: { in: toIdArray } },
         data: {
           postNotificationCount: { increment: 1 },
         },
@@ -769,7 +861,7 @@ export async function removeAnnouncementPost(postId: string) {
 
 export async function pinPost(postId: string, requesterId: string) {
   const post = await prisma.post.findUnique({
-    where: { id: postId, createdById: requesterId, deleted: null },
+    where: { id: postId, createdById: requesterId, deleted: false },
   });
   if (!post) {
     return [null, generateError('Post not found.')] as const;
@@ -826,7 +918,7 @@ export async function fetchPinnedPosts(opts: fetchPinnedPostsOpts) {
   const posts = await prisma.post.findMany({
     orderBy: { pinned: { pinnedAt: 'desc' } },
     where: {
-      deleted: null,
+      deleted: false,
       createdById: opts.userId,
       pinned: {
         pinnedById: opts.userId,

@@ -8,6 +8,7 @@ import { dateToDateTime, prisma } from '../common/database';
 import { generateId } from '../common/flakeId';
 import { removeDuplicates } from '../common/utils';
 import { hasBit, USER_BADGES } from '../common/Bitwise';
+import { addToObjectIfExists } from '../common/addToObjectIfExists';
 
 export interface ActivityStatus {
   socketId: string;
@@ -29,7 +30,7 @@ export interface Presence {
   activity?: ActivityStatus | null;
 }
 
-export async function getUserPresences(userIds: string[], includeSocketId = false): Promise<Presence[]> {
+export async function getUserPresences(userIds: string[], includeSocketId = false, hideOffline = true): Promise<Presence[]> {
   const multi = redisClient.multi();
   for (let i = 0; i < userIds.length; i++) {
     const userId = userIds[i]!;
@@ -44,6 +45,7 @@ export async function getUserPresences(userIds: string[], includeSocketId = fals
     const result = results[i] as string;
     if (!result) continue;
     const presence = JSON.parse(result);
+    if (hideOffline && presence.status === UserStatus.OFFLINE) continue;
     if (!includeSocketId && presence.activity) {
       delete presence.activity.socketId;
     }
@@ -58,7 +60,7 @@ export async function updateCachePresence(
   presence: Partial<Presence> & {
     userId: string;
   }
-): Promise<boolean> {
+): Promise<boolean | Presence> {
   const key = USER_PRESENCE_KEY_STRING(userId);
   const socketIdsKey = CONNECTED_SOCKET_ID_KEY_SET(userId);
 
@@ -66,19 +68,16 @@ export async function updateCachePresence(
 
   if (connectedCount === 0) return false;
 
-  if (presence.status === UserStatus.OFFLINE) {
-    await redisClient.del(key);
-    return true;
-  }
+  const currentStatus = await getUserPresences([userId], true, false);
 
-  const currentStatus = await getUserPresences([userId], true);
-  if (!currentStatus?.[0] && !presence.status) return false;
+  const isOffline = !currentStatus?.[0]?.status && !presence.status;
 
   if (presence.custom === null) presence.custom = undefined;
   if (presence.activity === null) presence.activity = undefined;
 
   await redisClient.set(key, JSON.stringify({ ...currentStatus[0], ...presence }));
-  return true;
+
+  return !isOffline;
 }
 
 // returns true if the first user is connected.
@@ -92,9 +91,10 @@ export async function addSocketUser(userId: string, socketId: string, presence: 
   const multi = redisClient.multi();
   multi.sAdd(socketIdsKey, socketId);
   multi.set(userIdKey, userId);
-  if (!count && presence.status !== UserStatus.OFFLINE) {
+  if (!count) {
     multi.set(presenceKey, JSON.stringify(presence));
   }
+
   await multi.exec();
 
   return count === 0;
@@ -133,6 +133,7 @@ export interface UserCache {
   application?: ApplicationCache;
 
   ip?: string;
+  shadowBanned?: boolean;
 }
 
 export interface AccountCache {
@@ -152,6 +153,7 @@ export async function getUserIdBySocketId(socketId: string) {
 }
 
 export async function getUserIdsBySocketIds(socketIds: string[]): Promise<string[]> {
+  if (!socketIds.length) return [];
   const userIds = await redisClient.mGet(socketIds.map((socketId) => CONNECTED_USER_ID_KEY_STRING(socketId)));
   return removeDuplicates(userIds.filter((id) => id) as string[]);
 }
@@ -184,6 +186,7 @@ export async function getUserCache(userId: string, beforeCache?: (user: UserCach
             botTokenVersion: user.application!.botTokenVersion,
           },
         }),
+    ...(user.shadowBan ? { shadowBanned: true } : {}),
     id: user.id,
     username: user.username,
     badges: user.badges,
@@ -260,6 +263,8 @@ export async function authenticateUser(token: string, ipAddress: string): Promis
 
   if (!isIpAllowed || userCache.ip !== ipAddress) {
     const ipBanned = await isIpBanned(ipAddress);
+    await addDevice(userCache.id, ipAddress);
+
     if (ipBanned && !isFounder) {
       return [
         null,
@@ -274,30 +279,18 @@ export async function authenticateUser(token: string, ipAddress: string): Promis
     }
     await addAllowedIPCache(ipAddress);
     await updateUserCache(userCache.id, { ip: ipAddress });
-    await addDevice(userCache.id, ipAddress);
   }
 
   return [userCache, null];
 }
 
 async function addDevice(userId: string, ipAddress: string) {
-  const device = await prisma.userDevice.findFirst({
-    where: { userId, ipAddress },
+  // cache this request as well to reduce database calls
+  await prisma.userDevice.upsert({
+    where: { userId_ipAddress: { userId, ipAddress } },
+    update: { lastSeenAt: dateToDateTime() },
+    create: { id: generateId(), userId, ipAddress, lastSeenAt: dateToDateTime() },
   });
-
-  if (device) {
-    await prisma.userDevice.update({
-      where: { id: device.id },
-      data: { lastSeenAt: dateToDateTime() },
-    });
-    return;
-  }
-
-  await prisma.userDevice
-    .create({
-      data: { id: generateId(), userId, ipAddress, lastSeenAt: dateToDateTime() },
-    })
-    .catch(console.error);
 }
 
 // Moderators Only

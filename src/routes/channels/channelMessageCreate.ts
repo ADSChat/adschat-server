@@ -1,17 +1,17 @@
 import { NextFunction, Request, Response, Router } from 'express';
-import { body } from 'express-validator';
+import { body, header } from 'express-validator';
 import { customExpressValidatorResult, generateError } from '../../common/errorHandler';
 import { CHANNEL_PERMISSIONS, ROLE_PERMISSIONS, USER_BADGES, hasBit, isUserAdmin } from '../../common/Bitwise';
 import { authenticate } from '../../middleware/authenticate';
 import { channelPermissions } from '../../middleware/channelPermissions';
 import { channelVerification } from '../../middleware/channelVerification';
 import { MessageType } from '../../types/Message';
-import { AttachmentProviders, createMessage } from '../../services/Message';
+import { AttachmentProviders, createMessage } from '../../services/Message/Message';
 import { memberHasRolePermission, memberHasRolePermissionMiddleware } from '../../middleware/memberHasRolePermission';
 import { rateLimit } from '../../middleware/rateLimit';
 import { deleteFile, verifyUpload } from '../../common/nerimityCDN';
 import { ChannelType, TextChannelTypes } from '../../types/Channel';
-import { Attachment } from '@prisma/client';
+import { Attachment } from '@src/generated/prisma/client';
 import { dateToDateTime, prisma } from '../../common/database';
 import { ChannelCache } from '../../cache/ChannelCache';
 import { UserCache } from '../../cache/UserCache';
@@ -22,6 +22,8 @@ import { createQueue } from '@nerimity/mimiqueue';
 import { redisClient } from '../../common/redis';
 import { checkAndUpdateRateLimit } from '../../cache/RateLimitCache';
 import { ServerMemberCache } from '../../cache/ServerMemberCache';
+import env from '../../common/env';
+import { generateId } from '../../common/flakeId';
 
 export function channelMessageCreate(Router: Router) {
   Router.post(
@@ -96,16 +98,20 @@ export function channelMessageCreate(Router: Router) {
 
 const queue = createQueue({
   name: 'create_message',
+  prefix: env.TYPE,
   redisClient,
 });
 
 const queueRoute = async (req: Request, res: Response) => {
-  await queue.add(
-    async () => {
-      await route(req, res);
-    },
-    { groupName: req.userIP }
-  );
+  // const t1 = performance.now();
+
+  // await queue.add(
+  //   async () => {
+  //     res.setHeader('T-q-took', (performance.now() - t1).toFixed(2) + 'ms');
+  await route(req, res);
+  // },
+  //   { groupName: req.userIP }
+  // );
 };
 
 interface Body {
@@ -205,14 +211,37 @@ async function route(req: Request, res: Response) {
   }
 
   if (req.channelCache.type === ChannelType.DM_TEXT && !req.channelCache.inbox.canMessage) {
-    return res.status(400).json(generateError('You cannot message this user.'));
+    const error = req.channelCache.inbox.canMessageError;
+    let errorMessage = 'You cannot message this user.';
+
+    if (error === 'BLOCKED_BY_REQUESTER') {
+      errorMessage = 'You have blocked this user.';
+    }
+
+    if (error === 'NOT_FRIENDS_REQUESTER') {
+      errorMessage = 'Your privacy settings does not allow you to message this user because you are not friends with them.';
+    }
+
+    if (error === 'NOT_FRIENDS_RECIPIENT') {
+      errorMessage = 'This users privacy settings does not allow you to message this user because you are not friends with them.';
+    }
+
+    if (error === 'NOT_FRIENDS_AND_SERVERS_REQUESTER') {
+      errorMessage = 'Your privacy settings does not allow you to message this user because you are not friends with them and you do not share a server with them.';
+    }
+
+    if (error === 'NOT_FRIENDS_AND_SERVERS_RECIPIENT') {
+      errorMessage = 'This users privacy settings does not allow you to message this user because you are not friends with them and you do not share a server with them.';
+    }
+
+    return res.status(400).json(generateError(errorMessage, undefined, error));
   }
 
   if (!TextChannelTypes.includes(req.channelCache.type)) {
     return res.status(400).json(generateError('You cannot send messages in this channel.'));
   }
 
-  if (!body.content?.trim() && !body.nerimityCdnFileId && !body.googleDriveAttachment) {
+  if (!body.content?.trim() && !body.nerimityCdnFileId && !body.googleDriveAttachment && !body.htmlEmbed) {
     return res.status(400).json(generateError('content or attachment is required.'));
   }
 
@@ -257,6 +286,27 @@ async function route(req: Request, res: Response) {
     };
   }
 
+  if (req.userCache.shadowBanned) {
+    return res.json({
+      id: generateId(),
+      ...body,
+      createdBy: {
+        id: req.userCache.id,
+        username: req.userCache.username,
+        avatar: req.userCache.avatar,
+        tag: req.userCache.tag,
+        hexColor: req.userCache.hexColor,
+        badges: req.userCache.badges,
+      },
+      channelId: req.channelCache.id,
+      createdAt: Date.now(),
+      reactions: [],
+      roleMentions: [],
+      quotedMessages: [],
+      type: MessageType.CONTENT,
+    });
+  }
+
   const [message, error] = await createMessage({
     silent: body.silent,
     channelId: req.channelCache.id,
@@ -280,7 +330,7 @@ async function route(req: Request, res: Response) {
     if (attachment?.provider === AttachmentProviders.Local && attachment.path) {
       deleteFile(attachment.path);
     }
-    return res.status(400).json(generateError(error));
+    return res.status(400).json(error);
   }
 
   res.json(message);

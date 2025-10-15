@@ -1,5 +1,5 @@
 import dotenv from 'dotenv';
-dotenv.config();
+dotenv.config({ quiet: true });
 
 import { Log } from './Log';
 
@@ -16,12 +16,15 @@ const origin = (): string | string[] => {
 
 export default {
   DEV_MODE: process.env.DEV_MODE === 'true',
-  PORT: parseInt(process.env.PORT as string),
+  API_PORT: parseInt(process.env.API_PORT as string),
+  WS_PORT: parseInt(process.env.WS_PORT as string),
   JWT_SECRET: process.env.JWT_SECRET as string,
   CONNECTIONS_SECRET: process.env.CONNECTIONS_SECRET as string,
+  JWT_WEBHOOK_SECRET: process.env.JWT_WEBHOOK_SECRET as string,
   JWT_CONNECTIONS_SECRET: process.env.JWT_CONNECTIONS_SECRET as string,
   DATABASE_URL: process.env.DATABASE_URL as string,
   REDIS_HOST: process.env.REDIS_HOST as string,
+  REDIS_PATH: process.env.REDIS_PATH as string,
   REDIS_PORT: parseInt(process.env.REDIS_PORT as string),
   REDIS_PASS: process.env.REDIS_PASS as string,
   ORIGIN: origin(),
@@ -52,4 +55,6 @@ export default {
   TENOR_API_KEY: process.env.TENOR_API_KEY as string,
   CLUSTER_INDEX: parseInt(process.env.CLUSTER_INDEX as string),
   OPTIMIZE_API_KEY: process.env.OPTIMIZE_API_KEY as string,
+  TYPE: (process.argv.includes('--ws') ? 'ws' : 'api') as 'api' | 'ws',
+  EXTERNAL_EMBED_SECRET: process.env.EXTERNAL_EMBED_SECRET as string,
 };

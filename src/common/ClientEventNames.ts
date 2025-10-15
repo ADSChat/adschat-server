@@ -10,6 +10,7 @@ export const USER_CONNECTION_REMOVED = 'user:connection_removed';
 
 export const USER_NOTIFICATION_SETTINGS_UPDATE = 'user:notification_settings_update';
 export const USER_REMINDER_ADD = 'user:reminder_add';
+export const USER_REMINDER_UPDATE = 'user:reminder_update';
 export const USER_REMINDER_REMOVE = 'user:reminder_remove';
 
 export const USER_PRESENCE_UPDATE = 'user:presence_update';
@@ -36,6 +37,8 @@ export const SERVER_ROLE_UPDATED = 'server:role_updated';
 export const SERVER_ROLE_ORDER_UPDATED = 'server:role_order_updated';
 export const SERVER_CHANNEL_ORDER_UPDATED = 'server:channel_order_updated';
 export const SERVER_ORDER_UPDATED = 'server:order_updated';
+export const SERVER_FOLDER_CREATED = 'server:folder_created';
+export const SERVER_FOLDER_UPDATED = 'server:folder_updated';
 export const SERVER_ROLE_DELETED = 'server:role_deleted';
 export const SERVER_MEMBER_JOINED = 'server:member_joined';
 export const SERVER_MEMBER_LEFT = 'server:member_left';
@@ -47,6 +50,8 @@ export const SERVER_CHANNEL_PERMISSIONS_UPDATED = 'server:channel_permissions_up
 export const SERVER_SCHEDULE_DELETE = 'server:schedule_delete';
 export const SERVER_REMOVE_SCHEDULE_DELETE = 'server:remove_schedule_delete';
 
+export const POST_MENTION = 'post:mention';
+
 export const MESSAGE_CREATED = 'message:created';
 export const MESSAGE_UPDATED = 'message:updated';
 export const CHANNEL_TYPING = 'channel:typing';
@@ -54,6 +59,7 @@ export const MESSAGE_DELETED = 'message:deleted';
 export const MESSAGE_DELETED_BATCH = 'message:deleted_batch';
 export const MESSAGE_REACTION_ADDED = 'message:reaction_added';
 export const MESSAGE_REACTION_REMOVED = 'message:reaction_removed';
+export const MESSAGE_MARK_UNREAD = 'message:mark_unread';
 
 export const MESSAGE_BUTTON_CLICKED = 'message:button_clicked';
 export const MESSAGE_BUTTON_CLICKED_CALLBACK = 'message:button_clicked_callback';

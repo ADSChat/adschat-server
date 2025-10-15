@@ -24,8 +24,18 @@ import { userDismissNotice } from './userDismissNotice';
 import { userPasswordResetCodeSent } from './userPasswordResetCodeSend';
 import { userPasswordReset } from './userPasswordReset';
 import { userToggleBadge } from './userToggleBadge';
+import { userSearch } from './userSearch';
+import { userExternalEmbedCreate } from './userExternalEmbedCreate';
+import { userExternalEmbedDelete } from './userExternalEmbedDelete';
+import { userExternalEmbedGet } from './userExternalEmbedGet';
+import { userExternalEmbedRawGet } from './userExternalEmbedRawGet';
 
 const UsersRouter = Router();
+
+userExternalEmbedCreate(UsersRouter);
+userExternalEmbedDelete(UsersRouter);
+userExternalEmbedGet(UsersRouter);
+userExternalEmbedRawGet(UsersRouter);
 
 userDismissNotice(UsersRouter);
 
@@ -50,6 +60,8 @@ userRegisterFCM(UsersRouter);
 userOpenDMChannel(UsersRouter);
 userUpdatePresence(UsersRouter);
 userDeleteAccount(UsersRouter);
+
+userSearch(UsersRouter);
 
 userNotifications(UsersRouter);
 userDetails(UsersRouter);

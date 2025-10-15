@@ -81,6 +81,7 @@ export interface UpdateServerRoleOptions {
   hexColor?: string;
   hideRole?: boolean;
   icon?: string | null;
+  applyOnJoin?: boolean;
 }
 
 export const updateServerRole = async (serverId: string, roleId: string, update: UpdateServerRoleOptions): Promise<CustomResult<UpdateServerRoleOptions, CustomError>> => {
@@ -100,9 +101,18 @@ export const updateServerRole = async (serverId: string, roleId: string, update:
     if (update.hideRole !== undefined) {
       return [null, generateError('Cannot hide default role.')];
     }
+    if (update.applyOnJoin) {
+      return [null, generateError('Default role is already applied on join.')];
+    }
   }
-  if (role.hexColor && !isValidHex(role.hexColor)) {
+  if (update.hexColor && !isValidHex(update.hexColor)) {
     return [null, generateError('Invalid hex color.')];
+  }
+
+  if (role.botRole) {
+    if (update.applyOnJoin) {
+      return [null, generateError('Cannot apply on join to a bot role.')];
+    }
   }
 
   await prisma.serverRole.update({ where: { id: role.id }, data: update });

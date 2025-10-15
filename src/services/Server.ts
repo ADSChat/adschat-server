@@ -1,4 +1,4 @@
-import { Channel, Prisma, Server, ServerMember, ServerRole } from '@prisma/client';
+import { Channel, Prisma, Server, ServerMember, ServerRole } from '@src/generated/prisma/client';
 import { getUserPresences } from '../cache/UserCache';
 import { CustomResult } from '../common/CustomResult';
 import { exists, prisma, publicUserExcludeFields, removeServerIdFromAccountOrder } from '../common/database';
@@ -9,7 +9,7 @@ import { CHANNEL_PERMISSIONS, ROLE_PERMISSIONS, addBit, hasBit } from '../common
 import { generateHexColor } from '../common/random';
 import { emitServerChannelOrderUpdated, emitServerEmojiAdd, emitServerEmojiRemove, emitServerEmojiUpdate, emitServerJoined, emitServerLeft, emitServerOrderUpdated, emitServerUpdated } from '../emits/Server';
 import { ChannelType } from '../types/Channel';
-import { createMessage, deleteRecentUserServerMessages } from './Message';
+import { createMessage, deleteRecentUserServerMessages } from './Message/Message';
 import { MessageType } from '../types/Message';
 import { emitUserPresenceUpdateTo } from '../emits/User';
 import { deleteAllInboxCache, deleteAllInboxCacheInServer, deleteServerChannelCaches } from '../cache/ChannelCache';
@@ -17,18 +17,19 @@ import { getVoiceUsersByChannelId } from '../cache/VoiceCache';
 import { deleteAllServerMemberCache, deleteServerMemberCache } from '../cache/ServerMemberCache';
 import { Log } from '../common/Log';
 import { deleteServerCache, updateServerCache } from '../cache/ServerCache';
-import { getPublicServer } from './Explore';
+import { getExploreItem, getPublicServer } from './Explore';
 import { createServerRole, deleteServerRole } from './ServerRole';
 import { addToObjectIfExists } from '../common/addToObjectIfExists';
 import { removeDuplicates } from '../common/utils';
 import { LastOnlineStatus } from './User/User';
 import { logServerDelete, logServerOwnershipUpdate, logServerUserBanned, logServerUserKicked, logServerUserUnbanned } from './AuditLog';
+import { removeManyWebhookCache } from '../cache/WebhookCache';
 
-const serverMemberWithLastOnlineDetails = Prisma.validator<Prisma.ServerMemberDefaultArgs>()({
+const ServerMemberWithLastOnlineDetails = {
   include: { user: { select: { ...publicUserExcludeFields, lastOnlineAt: true, lastOnlineStatus: true } } },
-});
+} satisfies { include: Prisma.ServerMemberInclude };
 
-type ServerMemberWithLastOnlineDetails = Prisma.ServerMemberGetPayload<typeof serverMemberWithLastOnlineDetails>;
+type ServerMemberWithLastOnlineDetails = Prisma.ServerMemberGetPayload<typeof ServerMemberWithLastOnlineDetails>;
 
 const filterLastOnlineDetailsFromServerMembers = (serverMembers: ServerMemberWithLastOnlineDetails[], requesterUserId: string) => {
   return serverMembers.map((serverMember) => {
@@ -147,7 +148,7 @@ export const createServer = async (opts: CreateServerOptions): Promise<CustomRes
   return [server, null];
 };
 
-export const getServers = async (userId: string) => {
+export const getServers = async (userId: string, includeCurrentUserServerMembersOnly = false) => {
   const user = await prisma.user.findUnique({
     where: { id: userId },
     include: {
@@ -164,6 +165,7 @@ export const getServers = async (userId: string) => {
             include: { _count: { select: { attachments: true } }, permissions: { select: { permissions: true, roleId: true } } },
           },
           serverMembers: {
+            ...(includeCurrentUserServerMembersOnly ? { where: { userId } } : {}),
             include: { user: { select: { ...publicUserExcludeFields, lastOnlineAt: true, lastOnlineStatus: true } } },
           },
           roles: true,
@@ -223,7 +225,7 @@ export const joinServer = async (
     return [null, generateError('You have reached the maximum number of servers.')] as const;
   }
 
-  const server = await prisma.server.findFirst({
+  const server = await prisma.server.findUnique({
     where: { id: serverId },
     include: {
       scheduledForDeletion: true,
@@ -246,7 +248,7 @@ export const joinServer = async (
     where: { serverId, userId },
   });
   if (isInServer) {
-    return [null, generateError('You are already in this server.')] as const;
+    return [null, generateError(bot ? 'This bot is already in this server' : 'You are already in this server.')] as const;
   }
 
   const isBanned = await exists(prisma.bannedServerMember, {
@@ -267,6 +269,9 @@ export const joinServer = async (
     botRoleId = botRole?.id || null;
   }
 
+  const applyOnJoinRoles = await prisma.serverRole.findMany({ where: { serverId, applyOnJoin: true }, select: { id: true } });
+  const applyOnJoinRoleIds = applyOnJoinRoles.map((role) => role.id);
+
   const [_, serverRoles, serverMember, serverChannels, serverMembers] = await prisma
     .$transaction([
       prisma.user.update({
@@ -279,7 +284,7 @@ export const joinServer = async (
           id: generateId(),
           serverId,
           userId,
-          roleIds: botRoleId ? [botRoleId] : [],
+          roleIds: botRoleId ? [botRoleId, ...applyOnJoinRoleIds] : applyOnJoinRoleIds,
         },
         include: { user: { select: publicUserExcludeFields } },
       }),
@@ -337,15 +342,18 @@ export const joinServer = async (
 export const deleteServer = async (serverId: string, deletedByUserId: string) => {
   const server = await prisma.server.findFirst({
     where: { id: serverId },
-    include: { channels: { select: { id: true } } },
+    include: { channels: { select: { id: true } }, webhooks: { select: { id: true } } },
   });
 
   if (!server) {
     return [null, generateError('Server does not exist.')] as const;
   }
 
+  await removeManyWebhookCache(server.webhooks.map((webhook) => webhook.id));
+
   await deleteAllInboxCacheInServer(serverId);
   await prisma.$transaction([
+    prisma.webhook.updateMany({ where: { serverId }, data: { deleting: true } }),
     prisma.server.delete({ where: { id: serverId } }),
     prisma.channel.updateMany({
       where: { serverId },
@@ -397,7 +405,7 @@ export const leaveServer = async (userId: string, serverId: string, ban = false,
   // check if user is in the server
   const member = await prisma.serverMember.findUnique({
     where: { userId_serverId: { serverId, userId } },
-    include: { user: { select: { bot: true } } },
+    include: { user: { select: { bot: true, account: { select: { id: true } } } } },
   });
   if (!member && !ban) {
     return [null, generateError('You are not in this server.')];
@@ -457,7 +465,9 @@ export const leaveServer = async (userId: string, serverId: string, ban = false,
   await prisma.$transaction(transactions);
 
   deleteAllInboxCache(userId);
-  await removeServerIdFromAccountOrder(userId, serverId);
+  if (member?.user.account?.id) {
+    await removeServerIdFromAccountOrder(member.user.account.id, serverId);
+  }
   if (!server.scheduledForDeletion && server.systemChannelId && leaveMessage) {
     await createMessage({
       channelId: server.systemChannelId,
@@ -672,35 +682,43 @@ export const getServerEmojis = async (serverId: string) => {
   return [server.customEmojis, null] as const;
 };
 
-export const updateServerOrder = async (userId: string, orderedServerIds: string[]) => {
+export const updateServerOrder = async (userId: string, _orderedServerIds: string[]) => {
   const user = await prisma.user.findFirst({
     where: { id: userId },
-    select: { servers: { select: { id: true } } },
+    select: { servers: { select: { id: true } }, account: { select: { serverFolders: { select: { id: true } } } } },
   });
 
-  if (!user) {
+  if (!user || !user.account) {
     return [null, generateError('User does not exist.')];
   }
 
+  const newOrderedServerIds = removeDuplicates(_orderedServerIds);
+
+  if (newOrderedServerIds.length !== _orderedServerIds.length) {
+    return [null, generateError('Duplicate server ids.')];
+  }
   const joinedServerIds = user.servers.map((server) => server.id);
-  if (joinedServerIds.length !== orderedServerIds.length) {
+  const folderIds = user.account.serverFolders.map((folder) => folder.id);
+
+  if (joinedServerIds.length + folderIds.length !== newOrderedServerIds.length) {
     return [null, generateError('Server order length does not match.')];
   }
 
-  const doesNotExist = joinedServerIds.find((id) => !orderedServerIds.includes(id));
+  const doesNotExistServer = joinedServerIds.filter((id) => !newOrderedServerIds.includes(id));
+  const doesNotExistFolder = doesNotExistServer.filter((id) => !newOrderedServerIds.includes(id));
 
-  if (doesNotExist) {
+  if (doesNotExistFolder.length) {
     return [null, generateError('Invalid server ids.')];
   }
 
   await prisma.account.update({
     where: { userId },
     data: {
-      serverOrderIds: orderedServerIds,
+      serverOrderIds: newOrderedServerIds,
     },
   });
 
-  emitServerOrderUpdated(userId, orderedServerIds);
+  emitServerOrderUpdated(userId, newOrderedServerIds);
 
   return [{ success: true }, null];
 };
@@ -713,10 +731,15 @@ export const updateServerEmoji = async (serverId: string, emojiId: string, newNa
 
   newName = newName.trim().replace(/[^0-9a-zA-Z]/g, '_');
 
-  const newEmoji = await prisma.customEmoji.update({
-    where: { id: emojiId },
-    data: { name: newName },
-  });
+  const newEmoji = await prisma.customEmoji
+    .update({
+      where: { id: emojiId },
+      data: { name: newName },
+    })
+    .catch(() => null);
+
+  if (!newEmoji) return [null, 'Emoji not found.'] as const;
+
   emitServerEmojiUpdate(serverId, emojiId, newName);
   return [newEmoji, null] as const;
 };
@@ -807,13 +830,13 @@ export async function updateServerChannelOrder(opts: UpdateServerChannelOrderOpt
 }
 
 export const getPublicServerFromEmoji = async (emojiId: string) => {
-  const emoji = await prisma.customEmoji.findFirst({
+  const emoji = await prisma.customEmoji.findUnique({
     where: { id: emojiId },
   });
 
   if (!emoji) return [null, generateError('Emoji not found.')] as const;
 
-  return getPublicServer(emoji.serverId);
+  return getExploreItem({ serverId: emoji.serverId });
 };
 
 interface Answer {

@@ -6,16 +6,18 @@ import { rateLimit } from '../../middleware/rateLimit';
 import { openDMChannel } from '../../services/User/User';
 import { redisClient } from '../../common/redis';
 import { createQueue } from '@nerimity/mimiqueue';
+import env from '../../common/env';
 
 export const queue = createQueue({
   name: 'openDM',
+  prefix: env.TYPE,
   redisClient,
 });
 
 export function userOpenDMChannel(Router: Router) {
   Router.post(
     '/users/:userId/open-channel',
-    authenticate(),
+    authenticate({ allowBot: true }),
     param('userId').not().isEmpty().withMessage('userId is required.').isString().withMessage('Invalid userId.').isLength({ min: 1, max: 320 }).withMessage('userId must be between 1 and 320 characters long.'),
     rateLimit({
       name: 'open_dm_channel',

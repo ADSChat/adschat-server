@@ -2,7 +2,7 @@ import admin from 'firebase-admin';
 import { cert } from 'firebase-admin/app';
 import { prisma } from '../common/database';
 import { NotificationPingMode, removeFCMTokens } from '../services/User/User';
-import { Message, ServerChannelPermissions, ServerRole } from '@prisma/client';
+import { Message, ServerChannelPermissions, ServerRole, User } from '@src/generated/prisma/client';
 import { ChannelCache } from '../cache/ChannelCache';
 import { ServerCache } from '../cache/ServerCache';
 import { Log } from '../common/Log';
@@ -25,7 +25,7 @@ if (credentials) {
 export async function sendServerPushMessageNotification(
   serverId: string,
   message: Message & {
-    createdBy: {
+    createdBy?: null | {
       id: string;
       username: string;
       avatar?: string | null;
@@ -42,8 +42,8 @@ export async function sendServerPushMessageNotification(
   channel: ChannelCache,
   server: ServerCache
 ) {
-  // if (message.silent) return;
-  // if (!credentials) return;
+  if (message.silent) return;
+  if (!credentials) return;
 
   const channelPermissions = await prisma.serverChannelPermissions.findMany({
     where: { channelId: message.channelId, serverId },
@@ -129,7 +129,12 @@ export async function sendServerPushMessageNotification(
 
   if (!tokens.length) return;
 
-  const content = message?.content?.substring(0, 100);
+  let content = message.content as string | undefined;
+
+  if (content) {
+    content = formatMessage(message as any)!;
+    content = content.substring(0, 100);
+  }
 
   const batchResponse = await admin.messaging().sendEachForMulticast({
     tokens,
@@ -141,8 +146,8 @@ export async function sendServerPushMessageNotification(
       serverName: server.name,
       channelId: message.channelId,
       serverId,
-      cUserId: message.createdBy.id,
-      cName: message.createdBy.username,
+      cUserId: message.createdBy!.id,
+      cName: message.createdBy!.username,
       ...(server.avatar ? { sAvatar: server.avatar } : undefined),
       ...(server.hexColor ? { sHexColor: server.hexColor } : undefined),
     },
@@ -156,7 +161,7 @@ export async function sendServerPushMessageNotification(
 
 export async function sendDmPushNotification(
   message: Message & {
-    createdBy: {
+    createdBy: null | {
       id: string;
       username: string;
       avatar?: string | null;
@@ -176,8 +181,12 @@ export async function sendDmPushNotification(
   ).map((fcm) => fcm.token);
   if (!tokens.length) return;
 
-  const content = message?.content?.substring(0, 100);
+  let content = message.content as string | undefined;
 
+  if (content) {
+    content = formatMessage(message as any)!;
+    content = content.substring(0, 100);
+  }
   const batchResponse = await admin.messaging().sendEachForMulticast({
     tokens,
     android: { priority: 'high' },
@@ -185,10 +194,10 @@ export async function sendDmPushNotification(
       ...(content ? { content } : undefined),
       type: message.type.toString(),
       channelId: message.channelId,
-      cUserId: message.createdBy.id,
-      cName: message.createdBy.username,
-      ...(message.createdBy.avatar ? { uAvatar: message.createdBy.avatar } : undefined),
-      ...(message.createdBy.hexColor ? { uHexColor: message.createdBy.hexColor } : undefined),
+      cUserId: message.createdBy!.id,
+      cName: message.createdBy!.username,
+      ...(message.createdBy!.avatar ? { uAvatar: message.createdBy!.avatar } : undefined),
+      ...(message.createdBy!.hexColor ? { uHexColor: message.createdBy!.hexColor } : undefined),
     },
   });
 
@@ -224,4 +233,32 @@ function hasChannelPermission(opts: hasChannelPermissionOpts) {
     totalPermissions = addBit(totalPermissions, permission.permissions || 0);
   }
   return hasBit(totalPermissions, CHANNEL_PERMISSIONS.PUBLIC_CHANNEL.bit);
+}
+
+const UserMentionRegex = /\[@:(.*?)\]/g;
+const RoleMentionRegex = /\[r:(.*?)\]/g;
+const CustomEmojiRegex = /\[[a]?ce:(.*?):(.*?)\]/g;
+const commandRegex = /^(\/[^:\s]*):\d+( .*)?$/m;
+
+function formatMessage(message: { mentions: User[]; content?: string; roleMentions: ServerRole[] }) {
+  const content = message.content;
+  if (!content) return;
+
+  const mentionReplace = content.replace(UserMentionRegex, (_, id) => {
+    const user = message.mentions?.find((m) => m.id === id);
+    return user ? `@${user.username}` : _;
+  });
+
+  const roleReplace = mentionReplace.replace(RoleMentionRegex, (_, id) => {
+    const role = message.roleMentions?.find((m) => m.id === id);
+    return role ? `@${role.name}` : _;
+  });
+
+  const cEmojiReplace = roleReplace.replace(CustomEmojiRegex, (_, __, p2) => {
+    return `:${p2}:`;
+  });
+
+  const commandReplace = cEmojiReplace.replace(commandRegex, '$1$2');
+
+  return commandReplace;
 }

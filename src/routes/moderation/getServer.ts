@@ -22,7 +22,7 @@ async function route(req: Request, res: Response) {
       id: true,
       scheduledForDeletion: true,
       createdAt: true,
-      publicServer: { select: { id: true } },
+      publicServer: { select: { id: true, pinnedAt: true } },
       createdBy: {
         select: {
           id: true,
@@ -32,6 +32,7 @@ async function route(req: Request, res: Response) {
           hexColor: true,
           avatar: true,
           suspension: true,
+          shadowBan: true,
           badges: true,
         },
       },

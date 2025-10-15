@@ -1,4 +1,4 @@
-import { Channel, Inbox } from '@prisma/client';
+import { Channel, Inbox } from '@src/generated/prisma/client';
 import { Socket } from 'socket.io';
 import { addSocketUser, authenticateUser, getUserPresences } from '../../cache/UserCache';
 import { AUTHENTICATED, USER_AUTH_QUEUE_POSITION } from '../../common/ClientEventNames';
@@ -19,13 +19,16 @@ import { FriendStatus } from '../../types/Friend';
 import { createQueue } from '@nerimity/mimiqueue';
 import { redisClient } from '../../common/redis';
 import { ReminderSelect } from '../../services/Reminder';
+import env from '../../common/env';
 
 interface Payload {
   token: string;
+  includeCurrentUserServerMembersOnly?: boolean;
 }
 
 export const authQueue = createQueue({
   name: 'wsAuth',
+  prefix: env.TYPE,
   redisClient,
   minTime: 10,
 });
@@ -33,23 +36,26 @@ export const authQueue = createQueue({
 export async function onAuthenticate(socket: Socket, payload: Payload) {
   const queueId = await authQueue.genId();
 
+  let queueEmitPositionIntervalId: NodeJS.Timeout | undefined;
+
   if (socket.connected) {
-    const setTimeout = setInterval(async () => {
+    queueEmitPositionIntervalId = setInterval(async () => {
       const pos = await authQueue.getQueuePosition(queueId);
       const actualPos = pos === null ? 0 : pos + 1;
       socket.emit(USER_AUTH_QUEUE_POSITION, { pos: actualPos });
       if (!actualPos) {
-        clearInterval(setTimeout);
+        clearInterval(queueEmitPositionIntervalId);
         return;
       }
       if (!socket.connected) {
-        clearInterval(setTimeout);
+        clearInterval(queueEmitPositionIntervalId);
       }
     }, 5000);
   }
 
   authQueue.add(
     async () => {
+      clearInterval(queueEmitPositionIntervalId);
       await handleAuthenticate(socket, payload).catch((err) => {
         console.error(err);
       });
@@ -97,6 +103,7 @@ const handleAuthenticate = async (socket: Socket, payload: Payload) => {
           hideFollowing: true,
           email: true,
           serverOrderIds: true,
+          serverFolders: { select: { id: true, serverIds: true, color: true, name: true } },
           dmStatus: true,
           friendRequestStatus: true,
           emailConfirmed: true,
@@ -109,13 +116,13 @@ const handleAuthenticate = async (socket: Socket, payload: Payload) => {
     emitError(socket, { message: 'User not found.', disconnect: true });
     return;
   }
-  const { servers, serverChannels, serverMembers, serverRoles } = await getServers(userCache.id);
+  const { servers, serverChannels, serverMembers, serverRoles } = await getServers(userCache.id, payload.includeCurrentUserServerMembersOnly);
 
   const lastSeenServerChannelIds = await getLastSeenServerChannelIdsByUserId(userCache.id);
 
   const messageMentions = await getAllMessageMentions(userCache.id);
 
-  const inbox = await getInbox(userCache.id);
+  const inbox = !user.bot ? await getInbox(userCache.id) : [];
   const inboxChannels: Channel[] = [];
 
   const inboxResponse: Inbox[] = inbox.map((item) => {
@@ -230,6 +237,7 @@ const handleAuthenticate = async (socket: Socket, payload: Payload) => {
       email: user.account?.email,
       customStatus: user.customStatus,
       orderedServerIds: user.account?.serverOrderIds,
+      serverFolders: user.account?.serverFolders,
       dmStatus: user.account?.dmStatus,
       friendRequestStatus: user.account?.friendRequestStatus,
       lastOnlineStatus: user.lastOnlineStatus,

@@ -1,11 +1,12 @@
 import { cpus } from 'node:os';
-import { prisma } from './common/database';
+import { getPostLikesFromDeletedUsers, prisma } from './common/database';
 import { Log } from './common/Log';
 import schedule from 'node-schedule';
 import { deleteChannelAttachmentBatch, deleteImageBatch } from './common/nerimityCDN';
 import env from './common/env';
 import { connectRedis, customRedisFlush, redisClient } from './common/redis';
 import { getAndRemovePostViewsCache } from './cache/PostViewsCache';
+import timers from 'timers/promises';
 
 import cluster from 'node:cluster';
 import { createIO } from './socket/socket';
@@ -14,6 +15,8 @@ import { createHash } from 'node:crypto';
 import { addToObjectIfExists } from './common/addToObjectIfExists';
 import { createQueueProcessor } from '@nerimity/mimiqueue';
 import { deleteServer } from './services/Server';
+import { Prisma } from '@src/generated/prisma/client';
+import { isString } from './common/utils';
 
 (Date.prototype.toJSON as unknown as (this: Date) => number) = function () {
   return this.getTime();
@@ -30,8 +33,13 @@ if (cluster.isPrimary) {
   await connectRedis();
   await customRedisFlush();
   await createQueueProcessor({
+    prefix: env.TYPE,
     redisClient,
   });
+
+  // await redisClient.hSet('testKey', { test1: 'lol', test2: 'lol2' });
+
+  // console.log(await redisClient.hGetAll('testKey'));
 
   createIO();
   prisma.$connect().then(() => {
@@ -41,15 +49,19 @@ if (cluster.isPrimary) {
 
     prismaConnected = true;
 
-    scheduleBumpReset();
-    vacuumSchedule();
-    scheduleDeleteMessages();
-    scheduleDeleteAccountContent();
-    removeIPAddressSchedule();
-    schedulePostViews();
-    scheduleSuspendedAccountDeletion();
-    scheduleServerDeletion();
-    removeExpiredBannedIpsSchedule();
+    if (env.TYPE === 'api') {
+      scheduleBumpReset();
+      vacuumSchedule();
+      scheduleDeleteMessages();
+      scheduleDeleteAccountContent();
+      removeIPAddressSchedule();
+      schedulePostViews();
+      scheduleSuspendedAccountDeletion();
+      scheduleServerDeletion();
+      removeExpiredBannedIpsSchedule();
+      removeExpiredSuspensions();
+      scheduleWebhookMessagesDelete();
+    }
   });
 
   for (let i = 0; i < cpuCount; i++) {
@@ -73,52 +85,90 @@ function scheduleBumpReset() {
   rule.minute = 0;
 
   schedule.scheduleJob(rule, async () => {
-    await prisma.publicServer.updateMany({ data: { bumpCount: 0 } });
+    await prisma.explore.updateMany({ data: { bumpCount: 0 } });
     Log.info('All public server bumps have been reset to 0.');
   });
 }
 
-async function scheduleDeleteAccountContent() {
+async function scheduleWebhookMessagesDelete() {
   setInterval(async () => {
-    const likedPosts = await prisma.postLike.findMany({
-      take: 300,
+    const webhook = await prisma.webhook.findFirst({
       where: {
-        likedBy: {
-          account: null,
-          application: null,
+        deleting: true,
+      },
+      select: {
+        id: true,
+        messages: {
+          take: 300,
+          select: {
+            id: true,
+            attachments: {
+              select: {
+                path: true,
+              },
+            },
+          },
         },
       },
-      select: { id: true },
     });
+
+    if (!webhook) return;
+
+    const messages = webhook.messages;
+
+    if (!messages.length) {
+      await prisma.webhook.delete({ where: { id: webhook.id } });
+      return;
+    }
+    const attachments = messages
+      .filter((m) => m.attachments.length)
+      .map((m) => m.attachments[0]?.path)
+      .filter(isString);
+    const messageIds = messages.map((m) => m.id);
+
+    await prisma.message.deleteMany({
+      where: { id: { in: messageIds } },
+    });
+
+    if (attachments.length) {
+      deleteImageBatch(attachments);
+    }
+  }, 60000);
+}
+
+async function scheduleDeleteAccountContent() {
+  setInterval(async () => {
+    const likedPosts = await getPostLikesFromDeletedUsers();
 
     if (likedPosts.length) {
       const ids = likedPosts.map((p) => p.id);
       await prisma.postLike.deleteMany({ where: { id: { in: ids } } });
     }
 
-    const messages = await prisma.message.findMany({
-      take: 300,
-      orderBy: {
-        createdAt: 'desc',
-      },
-      select: { id: true, attachments: { select: { path: true } } },
-      where: {
-        createdBy: {
-          scheduledForContentDeletion: { isNot: null },
-        },
-      },
-    });
+    const rawMessages = await prisma.$queryRaw<{ id: string }[]>`
+      SELECT "public"."messages"."id" 
+      FROM "public"."messages" 
+      LEFT JOIN "public"."users" AS "j0" ON ("j0"."id") = ("public"."messages"."createdById") 
+      LEFT JOIN "public"."schedule_account_content_delete" AS "j1" ON ("j1"."userId") = ("j0"."id") 
+      WHERE ((NOT ("j1"."userId" IS NULL)) AND ("j0"."id" IS NOT NULL)) LIMIT 300;
+    `;
+    const messages = !rawMessages.length
+      ? []
+      : await prisma.message.findMany({
+          take: 300,
+          select: { id: true, attachments: { select: { path: true } } },
+          where: {
+            id: { in: rawMessages.map((m) => m.id) },
+          },
+        });
     const messageAttachments = messages.filter((m) => m.attachments.length).map((m) => m.attachments[0]?.path);
     const messageIds = messages.map((m) => m.id);
 
     const posts = await prisma.post.findMany({
       take: 300,
-      orderBy: {
-        createdAt: 'desc',
-      },
       select: { id: true, attachments: { select: { path: true } } },
       where: {
-        deleted: null,
+        deleted: false,
         createdBy: {
           scheduledForContentDeletion: { isNot: null },
         },
@@ -190,13 +240,12 @@ function scheduleDeleteMessages() {
     if (!details.deletingMessages) return;
 
     const deletedCount = await prisma.$executeRaw`
-      DELETE FROM "Message"
+      DELETE FROM "messages"
       WHERE id IN 
       (
           SELECT id 
-          FROM "Message"
+          FROM "messages"
           WHERE "channelId"=${details.channelId}
-          ORDER BY "createdAt" DESC
           LIMIT 300       
       );
     `;
@@ -221,7 +270,7 @@ async function vacuumSchedule() {
   rule.minute = 0;
 
   schedule.scheduleJob(rule, async () => {
-    const res = await prisma.$queryRaw`VACUUM VERBOSE ANALYZE "Message"`;
+    const res = await prisma.$queryRaw`VACUUM VERBOSE ANALYZE "messages"`;
     console.log('VACUUM RESULT', res);
   });
 }
@@ -244,6 +293,23 @@ async function removeIPAddressSchedule() {
   });
 }
 
+async function removeExpiredSuspensions() {
+  await prisma.suspension
+    .deleteMany({
+      limit: 100,
+      where: {
+        expireAt: {
+          not: null,
+          lte: new Date(Date.now()),
+        },
+      },
+    })
+    .catch((err) => {
+      console.error(err);
+    });
+  await timers.setTimeout(60000); // 1 minute
+  removeExpiredSuspensions();
+}
 async function removeExpiredBannedIps() {
   await prisma.bannedIp.deleteMany({
     where: {
@@ -253,6 +319,7 @@ async function removeExpiredBannedIps() {
     },
   });
 }
+
 async function removeExpiredBannedIpsSchedule() {
   await removeExpiredBannedIps();
   // Schedule the task to run everyday at 0:00 UTC

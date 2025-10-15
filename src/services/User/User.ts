@@ -2,7 +2,7 @@ import { CustomError, generateError } from '../../common/errorHandler';
 import { CustomResult } from '../../common/CustomResult';
 import { emitInboxClosed, emitInboxOpened, emitUserPresenceUpdate, emitUserNotificationSettingsUpdate } from '../../emits/User';
 import { ChannelType } from '../../types/Channel';
-import { Presence, removeUserCacheByUserIds, updateCachePresence } from '../../cache/UserCache';
+import { getUserPresences, Presence, removeUserCacheByUserIds, updateCachePresence } from '../../cache/UserCache';
 import { FriendStatus } from '../../types/Friend';
 import { dateToDateTime, excludeFields, prisma, publicUserExcludeFields } from '../../common/database';
 import { generateId } from '../../common/flakeId';
@@ -10,10 +10,10 @@ import { generateId } from '../../common/flakeId';
 import { createPostNotification, fetchLatestPost, fetchPinnedPost, fetchPinnedPosts, PostNotificationType } from '../Post';
 
 import { leaveVoiceChannel } from '../Voice';
-import { MessageInclude } from '../Message';
+import { MessageInclude, transformMessage } from '../Message/Message';
 import { removeDuplicates } from '../../common/utils';
 import { addBit, hasBit, isUserAdmin, removeBit, USER_BADGES } from '../../common/Bitwise';
-import { Prisma } from '@prisma/client';
+import { Prisma } from '@src/generated/prisma/client';
 import { UserStatus } from '../../types/User';
 import { createHash } from 'node:crypto';
 import { checkUserPassword } from '../UserAuthentication';
@@ -47,7 +47,7 @@ export const isExpired = (expireDate: Date) => {
 };
 
 export const isIpBanned = async (ipAddress: string) => {
-  const ban = await prisma.bannedIp.findFirst({ where: { ipAddress } });
+  const ban = await prisma.bannedIp.findUnique({ where: { ipAddress } });
   if (!ban) return false;
   if (!ban.expireAt) return ban;
 
@@ -87,6 +87,7 @@ export const getUserWithAccount = async (userId: string) => {
   return await prisma.user.findUnique({
     where: { id: userId },
     include: {
+      shadowBan: { select: { bannedAt: true } },
       account: {
         select: excludeFields('Account', ['password']),
       },
@@ -165,54 +166,57 @@ export const openDMChannel = async (userId: string, friendId: string) => {
     }
   }
 
-  const newChannel = inbox
-    ? { id: inbox?.channelId }
-    : await prisma.channel.create({
+  const newInbox = await prisma
+    .$transaction(async (tx) => {
+      const newChannel = inbox
+        ? { id: inbox?.channelId }
+        : await tx.channel.create({
+            data: {
+              id: generateId(),
+              type: ChannelType.DM_TEXT,
+              createdById: userId,
+            },
+          });
+
+      const newInbox = await tx.inbox.create({
         data: {
           id: generateId(),
-          type: ChannelType.DM_TEXT,
+          channelId: newChannel.id,
           createdById: userId,
+          recipientId: friendId,
+          closed: false,
+        },
+        include: {
+          channel: { include: { _count: { select: { attachments: true } } } },
+          recipient: { select: publicUserExcludeFields },
         },
       });
 
-  const newInbox = await prisma.inbox
-    .create({
-      data: {
-        id: generateId(),
-        channelId: newChannel.id,
-        createdById: userId,
-        recipientId: friendId,
-        closed: false,
-      },
-      include: {
-        channel: { include: { _count: { select: { attachments: true } } } },
-        recipient: { select: publicUserExcludeFields },
-      },
-    })
+      const recipientInbox = await tx.inbox.findFirst({
+        where: {
+          createdById: friendId,
+          recipientId: userId,
+        },
+      });
+      if (!recipientInbox) {
+        // also create a closed inbox for recipient
+        await tx.inbox.create({
+          data: {
+            id: generateId(),
+            channelId: newChannel.id,
+            createdById: friendId,
+            recipientId: userId,
+            closed: true,
+          },
+        });
+      }
 
-    .catch(() => {});
+      return newInbox;
+    })
+    .catch(() => null);
 
   if (!newInbox) {
     return [null, generateError('Something went wrong.')] as const;
-  }
-
-  const recipientInbox = await prisma.inbox.findFirst({
-    where: {
-      createdById: friendId,
-      recipientId: userId,
-    },
-  });
-  if (!recipientInbox) {
-    // also create a closed inbox for recipient
-    await prisma.inbox.create({
-      data: {
-        id: generateId(),
-        channelId: newChannel.id,
-        createdById: friendId,
-        recipientId: userId,
-        closed: true,
-      },
-    });
   }
 
   emitInboxOpened(userId, newInbox);
@@ -250,12 +254,13 @@ export const updateUserPresence = async (userId: string, presence: PresencePaylo
 
   let emitPayload: (PresencePayload & { userId: string }) | undefined;
 
+  const currentPresence = await getUserPresences([user.id], false, false).then((result) => result[0]!);
+
   if (!user.status && presence.status) {
     // emit everything when going from offline to online
     emitPayload = {
-      custom: newUser.customStatus || undefined,
-      status: newUser.status,
-      userId: user.id,
+      ...currentPresence,
+      ...presence,
     };
   } else {
     emitPayload = { ...presence, userId: user.id };
@@ -266,13 +271,14 @@ export const updateUserPresence = async (userId: string, presence: PresencePaylo
   return ['Presence updated.', null];
 };
 
-export const getUserDetails = async (requesterId: string, recipientId: string, requesterIpAddress: string, includePinnedPosts = false) => {
+export const getUserDetails = async (requesterId: string, recipientId: string, requesterIpAddress: string, includePinnedPosts = false, includeBotCommands = false) => {
   const user = await prisma.user.findFirst({
     where: { id: recipientId },
     select: {
       ...publicUserExcludeFields,
       application: {
         select: {
+          ...(includeBotCommands ? { botCommands: { orderBy: { name: 'asc' }, select: { name: true, description: true, args: true } } } : {}),
           creatorAccount: {
             select: {
               user: {
@@ -303,7 +309,7 @@ export const getUserDetails = async (requesterId: string, recipientId: string, r
           followers: true,
           following: true,
           likedPosts: true,
-          posts: { where: { deleted: null } },
+          posts: { where: { deleted: false } },
         },
       },
       account: {
@@ -444,13 +450,19 @@ export async function followUser(requesterId: string, followToId: string): Promi
     return [null, generateError('This user is blocked.')];
   }
 
-  await prisma.follower.create({
-    data: {
-      id: generateId(),
-      followedById: requesterId,
-      followedToId: followToId,
-    },
-  });
+  const res = await prisma.follower
+    .create({
+      data: {
+        id: generateId(),
+        followedById: requesterId,
+        followedToId: followToId,
+      },
+    })
+    .catch(() => null);
+
+  if (!res) {
+    return [null, generateError('Something went wrong. Try again later.')];
+  }
   createPostNotification({
     type: PostNotificationType.FOLLOWED,
     byId: requesterId,
@@ -617,7 +629,26 @@ export async function getUserNotifications(userId: string) {
       id: true,
       server: true,
       serverMember: true,
-      message: { include: MessageInclude },
+      message: {
+        include: {
+          ...MessageInclude,
+
+          reactions: {
+            select: {
+              reactedUsers: { where: { userId } },
+              emojiId: true,
+              gif: true,
+              name: true,
+              _count: {
+                select: {
+                  reactedUsers: true,
+                },
+              },
+            },
+            orderBy: { id: 'asc' },
+          },
+        },
+      },
     },
     orderBy: { createdAt: 'desc' },
     take: 20,
@@ -637,7 +668,12 @@ export async function getUserNotifications(userId: string) {
       .then(() => {});
   }
 
-  return notifications;
+  const mappedNotifications = notifications.map((n) => ({
+    ...n,
+    message: n.message ? transformMessage(n.message) : n.message,
+  }));
+
+  return mappedNotifications;
 }
 
 export async function dismissUserNotice(noticeId: string, userId: string) {
@@ -669,4 +705,77 @@ export async function verifyPassword(accountId: string, password: string) {
   const isPasswordValid = await checkUserPassword(account.password, password);
   if (!isPasswordValid) return [false, generateError('Invalid Password')] as const;
   return [true] as const;
+}
+
+export async function searchUsers(requesterUserId: string, query: string) {
+  //search for a user by username. order by followers, then by username
+
+  const followedTo = await prisma.follower.findMany({
+    where: {
+      followedById: requesterUserId,
+      followedTo: {
+        username: { contains: query, mode: 'insensitive' },
+      },
+    },
+    select: {
+      followedTo: {
+        select: {
+          username: true,
+          tag: true,
+          avatar: true,
+          hexColor: true,
+          badges: true,
+          id: true,
+        },
+      },
+    },
+    orderBy: {
+      followedTo: { username: 'desc' },
+    },
+    take: 10,
+  });
+
+  const followedToId = followedTo.map((f) => f.followedTo.id);
+  const followedUsers = followedTo.map((f) => f.followedTo);
+  if (followedUsers.length >= 10) return followedUsers;
+
+  const users = await prisma.user.findMany({
+    where: {
+      id: { notIn: followedToId },
+      username: { contains: query, mode: 'insensitive' },
+      OR: [{ NOT: { account: null } }, { NOT: { application: null } }],
+    },
+    select: {
+      username: true,
+      tag: true,
+      avatar: true,
+      hexColor: true,
+      id: true,
+      badges: true,
+    },
+    orderBy: { username: 'desc' },
+    take: 10 - followedUsers.length,
+  });
+
+  const array = [...followedUsers, ...users];
+
+  const userIds = array.map((u) => u.id);
+
+  const blockedUsers = await prisma.friend.findMany({
+    where: {
+      status: FriendStatus.BLOCKED,
+      OR: [
+        { recipientId: { in: userIds }, userId: requesterUserId },
+        { recipientId: requesterUserId, userId: { in: userIds } },
+      ],
+    },
+  });
+
+  const filtered = array.filter((u) => {
+    if (u.id === requesterUserId) return true;
+    const blocked = blockedUsers.find((b) => b.userId === u.id || b.recipientId === u.id);
+    return !blocked;
+  });
+
+  return filtered;
 }

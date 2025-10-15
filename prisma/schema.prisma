@@ -1,5 +1,9 @@
 generator client {
-  provider = "prisma-client-js"
+  provider = "prisma-client"
+  engineType = "client"
+
+  output   = "../src/generated/prisma"
+  previewFeatures = ["relationJoins"]
 }
 
 datasource db {
@@ -9,6 +13,8 @@ datasource db {
 }
 
 model Account {
+  @@map("accounts")
+  
   id              String  @id
   email           String  @unique
   password        String
@@ -37,9 +43,29 @@ model Account {
 
   hideFollowers Boolean @default(false)
   hideFollowing Boolean @default(false)
+
+  serverFolders ServerFolder[]
+
+  @@index([userId])
+}
+
+
+model ServerFolder {
+  @@map("server_folders")
+  id String @id
+  color String
+  name String
+  serverIds String[]
+
+  accountId   String
+  account     Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+
+  createdAt DateTime @default(now())
 }
 
 model Application {
+  @@map("applications")
   id          String   @id
   name        String
   description String?
@@ -50,29 +76,34 @@ model Application {
   botTokenVersion Int  @default(1)
 
 
+  publicApplication Explore?
+
 
   creatorAccountId   String
   creatorAccount     Account  @relation(fields: [creatorAccountId], references: [id], onDelete: Cascade)
   createdAt   DateTime @default(now())
-
-
+  botCommands BotCommand[]
 }
 
 
-// make a model to store all the ips that have been banned. it will also have an expire date
+// store all the ips that have been banned. it will also have an expire date
 model BannedIp {
+  @@map("banned_ips")
   id String @id
   ipAddress String @unique
   expireAt  DateTime
 }
 
 model FirebaseMessagingToken {
+  @@map("fcm_tokens")
   token String @unique
   accountId String
   account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  @@index([accountId])
 }
 
 model User {
+  @@map("users")
   id                     String                  @id
   badges                 Int                     @default(0)
   username               String
@@ -119,6 +150,8 @@ model User {
   sentPostNotifications  PostNotification[]
   mentionedMessages      Message[]               @relation(name: "mentioned_messages")
 
+  mentionedPosts    Post[]  @relation(name: "mentioned_posts")
+
   profile                UserProfile?
 
   messageNotifications         MessageNotification[]
@@ -156,10 +189,47 @@ model User {
 
   scheduledServerDeletions ScheduleServerDelete[]
 
+  shadowBan ShadowBan?
+  shadowBannedUsers ShadowBan[] @relation(name: "shadow_banned_users")
+
+  botCommands BotCommand[]
+
+  externalEmbed ExternalEmbed?
+
+  webhooks               Webhook[]
+
+
   @@unique([username, tag])
+  @@index([joinedAt])
+
+  @@index([tag])
+}
+
+
+
+
+
+model BotCommand {
+  @@map("bot_commands")
+  id String @id
+  
+  botUserId String
+  botUser User @relation(fields: [botUserId], references: [id], onDelete: Cascade)
+
+  applicationId String
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  
+  
+  name String
+  description String?
+  args String?
+
+  @@index([botUserId, name])
+  @@unique([applicationId, name])
 }
 
 model UserConnection {
+  @@map("user_connections")
   id String @id
   userId String
   user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -173,6 +243,7 @@ model UserConnection {
 // Used for ip banning.
 // In the future, account owners to see whos logged in to your account.
 model UserDevice {
+  @@map("user_devices")
   id          String    @id
   userId      String
   ipAddress   String
@@ -181,11 +252,14 @@ model UserDevice {
   createdAt   DateTime @default(now())
   lastSeenAt  DateTime @default(now())
 
-  @@index([userId, ipAddress])
+  @@unique([userId, ipAddress])
+  @@index([ipAddress])
+
 }
 
 
 model MessageNotification {
+  @@map("message_notifications")
   id             String @id
   userId         String
 
@@ -200,10 +274,13 @@ model MessageNotification {
   createdAt               DateTime                @default(now())
 
   @@index([messageId, createdAt])
+  @@index([userId, createdAt])
+  @@index([serverId])
 }
 
 
 model UserNotice {
+  @@map("user_notices")
   id             String @id
 
   type           Int
@@ -226,6 +303,7 @@ model UserNotice {
 }
 
 model UserProfile {
+  @@map("user_profiles")
   userId    String   @id
   user      User @relation(fields: [userId], references: [id])
   bio       String?
@@ -237,6 +315,7 @@ model UserProfile {
 }
 
 model Follower {
+  @@map("followers")
   id            String   @id
   followedById  String
   followedBy    User     @relation(fields: [followedById], references: [id], name: "following")
@@ -244,11 +323,26 @@ model Follower {
   followedToId  String
   followedTo    User     @relation(fields: [followedToId], references: [id])
   @@unique([followedById, followedToId])
+  @@index([followedById, followedToId])
+  @@index([followedToId])
 }
 
 
+model ShadowBan {
+  @@map("shadow_bans")
+  id            String   @id
+  userId        String   @unique
+  user          User     @relation(fields: [userId], references: [id])
+
+  bannedAt      DateTime @default(now())
+  reason        String?
+
+  bannedById      String
+  bannedBy      User     @relation(fields: [bannedById], references: [id], name: "shadow_banned_users")
+}
 
 model Suspension {
+  @@map("suspensions")
   id            String    @id
   suspendedAt   DateTime  @default(now())
   expireAt      DateTime?
@@ -266,6 +360,7 @@ model Suspension {
 }
 
 model Server {
+  @@map("servers")
   id                     String                  @id
   name                   String
   avatar                 String?
@@ -293,7 +388,7 @@ model Server {
   bannedUsers            BannedServerMember[]
   verified               Boolean                @default(false)
 
-  publicServer           PublicServer?
+  publicServer           Explore?
 
   attachments Attachment[]
 
@@ -311,10 +406,18 @@ model Server {
   scheduledForDeletion ScheduleServerDelete?
 
 
+  externalEmbed ExternalEmbed?
+
+  webhooks               Webhook[]
+
+@@index([createdAt])
+
+
 }
 
 // Personal settings for joined servers
 model UserNotificationSettings {
+  @@map("user_notification_settings")
   id String @id
 
   serverId String?
@@ -337,6 +440,7 @@ model UserNotificationSettings {
 
 
 model CustomEmoji {
+  @@map("custom_emojis")
   id           String  @id
   name         String
   gif          Boolean
@@ -346,13 +450,24 @@ model CustomEmoji {
 
   uploadedById String 
   uploadedBy   User    @relation(fields: [uploadedById], references: [id], onDelete: Cascade) 
+
+  @@index([serverId])
 }
 
 
-model PublicServer {
-  id              String    @id
-  serverId        String    @unique
-  server          Server    @relation(fields: [serverId], references: [id], onDelete: Cascade) 
+model Explore {
+  @@map("explore")
+  id              String     @id
+  serverId        String?    @unique
+  server          Server?    @relation(fields: [serverId], references: [id], onDelete: Cascade) 
+
+  type            Int     @default(0)
+
+  botApplicationId String?  @unique
+  botApplication   Application? @relation(fields: [botApplicationId], references: [id], onDelete: Cascade)
+  botPermissions   Int?
+
+
   description     String
 
   bumpCount       Int       @default(1)
@@ -360,10 +475,15 @@ model PublicServer {
 
   lifetimeBumpCount   Int   @default(1)
 
+  pinnedAt        DateTime?
   createdAt       DateTime   @default(now())
+
+  @@index([type])
+  @@index([bumpedAt])
 }
 
 model ServerRole {
+  @@map("server_roles")
   id                     String                  @id
   name                   String
   icon                   String?
@@ -382,6 +502,7 @@ model ServerRole {
   order                  Int
 
   botRole     Boolean?
+  applyOnJoin            Boolean                 @default(false)
 
   createdAt              DateTime                @default(now())
 
@@ -391,10 +512,13 @@ model ServerRole {
   mentionedMessages      Message[]               @relation(name: "role_mentioned_messages")
 
 
+  @@index([serverId])
+
 }
 
 
 model ServerWelcomeQuestion {
+  @@map("server_welcome_questions")
   id          String   @id
   createdAt   DateTime @default(now())
 
@@ -410,6 +534,7 @@ model ServerWelcomeQuestion {
 }
 
 model ServerWelcomeAnswer {
+  @@map("server_welcome_answers")
   id          String   @id
   createdAt   DateTime @default(now())
 
@@ -423,6 +548,7 @@ model ServerWelcomeAnswer {
 }
 
 model AnsweredServerWelcomeQuestion {
+  @@map("answered_server_welcome_questions")
   id          String   @id
   answeredAt  DateTime @default(now())
 
@@ -443,8 +569,9 @@ model AnsweredServerWelcomeQuestion {
 
 
 model ServerInvite {
+  @@map("server_invites")
   id          String   @id
-  code        String
+  code        String   @unique
   isCustom    Boolean
   uses        Int      @default(0)
   serverId    String
@@ -452,9 +579,14 @@ model ServerInvite {
   createdAt   DateTime @default(now())
   createdBy   User     @relation(fields: [createdById], references: [id])
   server      Server   @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  externalEmbed ExternalEmbed?
+
+  @@index([serverId])
 }
 
 model ServerMember {
+  @@map("server_members")
   id       String   @id
   serverId String
   userId   String
@@ -471,11 +603,12 @@ model ServerMember {
   answeredWelcomeQuestions AnsweredServerWelcomeQuestion[]
 
   @@unique([userId, serverId])
-
+  @@index([serverId])
 }
 
 
 model BannedServerMember {
+  @@map("banned_server_members")
   id       String  @id
   userId   String
   serverId String
@@ -484,6 +617,7 @@ model BannedServerMember {
 }
 
 model Friend {
+  @@map("friends")
   id          String   @id
   status      Int
   userId      String 
@@ -496,6 +630,7 @@ model Friend {
 }
 
 model Channel {
+  @@map("channels")
   id                     String                  @id
   name                   String?
   icon                   String?
@@ -534,9 +669,57 @@ model Channel {
   permissions ServerChannelPermissions[]
 
   reminders             Reminder[]
+
+
+  webhooks               Webhook[]
+
+  @@index([serverId])
+  @@index([categoryId])
+
+}
+
+model MessageCreatorOverride {
+  @@map("message_creator_overrides")
+  id Int @id @default(autoincrement())
+
+  username String?
+  avatarUrl String?
+
+  messages   Message[]
+
+  @@unique([username, avatarUrl])
+}
+
+model Webhook {
+  @@map("webhooks")
+  id String @id
+  
+  deleting Boolean?
+
+  name String
+  hexColor String
+  avatar String?
+
+  channelId String?
+  channel   Channel? @relation(fields: [channelId], references: [id], onDelete: SetNull)
+
+  serverId String?
+  server   Server? @relation(fields: [serverId], references: [id], onDelete: SetNull)
+
+
+  createdById String
+  createdBy User @relation(fields: [createdById], references: [id], onDelete: Cascade)
+
+  messages Message[]
+
+  mentions MessageMention[]
+
+
+  createdAt DateTime @default(now())
 }
 
 model ServerChannelPermissions {
+  @@map("server_channel_permissions")
 
   permissions     Int?
 
@@ -552,9 +735,14 @@ model ServerChannelPermissions {
   createdAt DateTime @default(now())
 
   @@id([roleId, channelId])
+
+  @@index([channelId])
+  @@index([serverId])
+
 }
 
 model Ticket {
+  @@map("tickets")
   id          Int   @id @default(autoincrement())
   title       String
   category    Int
@@ -571,6 +759,7 @@ model Ticket {
 }
 
 model Inbox {
+  @@map("inboxes")
   id          String   @id
   createdById String
   recipientId String
@@ -583,20 +772,30 @@ model Inbox {
   lastSeen    DateTime?
 
   @@unique([createdById, channelId])
+  @@index([channelId])
 }
 
 model Message {
+  @@map("messages")
   id          String   @id
   content     String
   type        Int
   channelId   String
-  createdById String
+  createdById String?
   editedAt    DateTime?
   createdAt   DateTime @default(now())
   channel     Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
-  createdBy   User     @relation(fields: [createdById], references: [id])
+  createdBy   User?     @relation(fields: [createdById], references: [id])
   mentions    User[]  @relation(name: "mentioned_messages")
   roleMentions ServerRole[]  @relation(name: "role_mentioned_messages")
+
+  creatorOverrideId Int?
+  creatorOverride MessageCreatorOverride? @relation(fields: [creatorOverrideId], references: [id])
+
+
+  webhookId String?
+  webhook Webhook? @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
 
   attachments Attachment[]
   reactions   MessageReaction[]
@@ -605,7 +804,7 @@ model Message {
   quotedInMessages Message[] @relation(name: "quoted_messages")
 
   embed Json?
-  htmlEmbed Json?
+  htmlEmbed String?
 
   messageNotifications         MessageNotification[]
 
@@ -623,12 +822,19 @@ model Message {
 
 
 
-  @@index([channelId])
+  @@index([createdById])
   @@index([channelId, createdAt])
+  @@index([channelId, id])
+  @@index([createdAt])
+  @@index([webhookId])
+  @@index([creatorOverrideId])
+  @@index([channelId, createdAt(sort: Desc), id(sort: Desc)])
+
 }
 
 
 model MessageButton {
+  @@map("message_buttons")
   order Int @default(autoincrement())
 
   messageId String
@@ -641,9 +847,12 @@ model MessageButton {
 
   @@id([messageId, id])
 
+  @@index([messageId, order])
+
 }
 
 model ReplyMessages {
+  @@map("reply_messages")
   id       String @id
   messageId String
 
@@ -653,15 +862,16 @@ model ReplyMessages {
   replyToMessage Message? @relation(fields: [replyToMessageId], references: [id], onDelete: SetNull, name: "reply_to_messages")
 
   @@unique([messageId, replyToMessageId])
-
-
   @@index([replyToMessageId, messageId])
+
+  @@index([messageId, id(sort: Desc)])
 
 }
 
 // When deleting a channel or a server, we will delete 1000 messages every 1 minute
 // To not cause strain to the server.
 model ScheduleMessageDelete {
+  @@map("schedule_message_delete")
   channelId           String   @id
   deletingMessages    Boolean  @default(true)
   deletingAttachments Boolean  @default(true)
@@ -669,13 +879,18 @@ model ScheduleMessageDelete {
 }
 
 model ScheduleAccountContentDelete {
+  @@map("schedule_account_content_delete")
   userId           String   @unique
   user              User     @relation(fields: [userId], references: [id])
   scheduledAt      DateTime @default(now())
+
+  @@index([userId, scheduledAt])
+
 }
 
 // Only used when Nerimity mod deletes a server.
 model ScheduleServerDelete {
+  @@map("schedule_server_delete")
   serverId           String   @unique
   server              Server     @relation(fields: [serverId], references: [id], onDelete: Cascade)
   scheduledByUserId   String
@@ -684,6 +899,7 @@ model ScheduleServerDelete {
 }
 
 model MessageReaction {
+  @@map("message_reactions")
   id  String   @id
   name  String
   emojiId String?
@@ -697,9 +913,11 @@ model MessageReaction {
 
   @@index([messageId])
 
+
 }
 
 model ReactedMessageUser {
+  @@map("reacted_message_users")
   reactionId String
   userId String
 
@@ -709,28 +927,42 @@ model ReactedMessageUser {
   reactedAt DateTime @default(now())
 
   @@unique([reactionId, userId])
+  @@index([userId])
 }
 
 
 model MessageMention {
+  @@map("message_mentions")
   id            String   @id
-  mentionedById String
+  mentionedById String?
+  mentionedByWebhookId String?
   mentionedToId String
   channelId     String
   serverId      String?
   count         Int      @default(0)
   createdAt     DateTime @default(now())
   channel       Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
-  mentionedBy   User     @relation("sent_message_mentions", fields: [mentionedById], references: [id])
+  mentionedBy   User?     @relation("sent_message_mentions", fields: [mentionedById], references: [id])
   mentionedTo   User     @relation("message_mentions", fields: [mentionedToId], references: [id])
   server        Server?  @relation(fields: [serverId], references: [id], onDelete: Cascade)
 
+  webhook       Webhook? @relation(fields: [mentionedByWebhookId], references: [id], onDelete: SetNull)
+
+
+
+
+
 
   @@unique([mentionedById, mentionedToId, channelId])
-
+  @@unique([mentionedByWebhookId, mentionedToId, channelId])
+  @@index([mentionedToId])
+  @@index([channelId])
+  @@index([serverId])
+  
 }
 
 model Attachment {
+  @@map("attachments")
   id          String @id
   
   provider    String @default("local")
@@ -759,11 +991,16 @@ model Attachment {
 
   createdAt   DateTime @default(now())
 
+
+  @@index([serverId])
   @@index([messageId, createdAt])
+  @@index([channelId])
+  @@index([postId])
 
 }
 
 model ServerChannelLastSeen {
+  @@map("server_channel_last_seen")
   id        String   @id
   userId    String
   serverId  String
@@ -774,9 +1011,12 @@ model ServerChannelLastSeen {
   user      User     @relation(fields: [userId], references: [id])
 
   @@unique([channelId, userId, serverId])
+  @@index([userId])
+  @@index([serverId])
 }
 
 model AnnouncementPost {
+  @@map("announcement_posts")
   postId String @id
 
   createdAt DateTime @default(now())
@@ -784,12 +1024,16 @@ model AnnouncementPost {
 }
 
 model Post {
+  @@map("posts")
   id          String   @id
   createdById String
   createdBy   User @relation(fields: [createdById], references: [id])
   content     String?
   createdAt   DateTime @default(now())
   editedAt    DateTime?
+
+
+  mentions    User[]  @relation(name: "mentioned_posts")
 
 
   quotedPostId    String?
@@ -820,7 +1064,7 @@ model Post {
 
 
   notifications PostNotification[]
-  deleted Boolean?
+  deleted Boolean @default(false)
 
   poll PostPoll?
 
@@ -828,12 +1072,23 @@ model Post {
 
 
   reminders Reminder[]
+  embed Json?
 
-  @@index([createdById, createdAt])
+
+  @@index([createdAt(sort: Desc), createdById, commentToId, deleted])
+  @@index([commentToId, deleted, createdAt(sort: Desc), createdById])
+  @@index([createdById, createdAt(sort: Desc)])
+  @@index([commentToId, deleted])
+  @@index([estimateLikes(sort: Desc), createdAt])
+  @@index([repostId])
+  @@index([createdById, deleted, commentToId, createdAt(sort: Desc)])
+  @@index([quotedPostId])
+
 
 }
 
 model PinnedPost {
+  @@map("pinned_posts")
   postId String @id
   post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
 
@@ -845,6 +1100,7 @@ model PinnedPost {
 }
 
 model PostPoll {
+  @@map("post_polls")
   id          String   @id
 
   postId String @unique
@@ -852,9 +1108,12 @@ model PostPoll {
 
   choices PostPollChoice[] 
   votedUsers PostPollVotedUser[]
+
+  @@index([postId])
 }
 
 model PostPollChoice {
+  @@map("post_poll_choices")
   id          String   @id
 
   pollId String
@@ -863,9 +1122,12 @@ model PostPollChoice {
   content String
 
   votedUsers PostPollVotedUser[]
+
+  @@index([pollId])
 }
 
 model PostPollVotedUser {
+  @@map("post_poll_voted_users")
   id          String   @id
 
   pollId String
@@ -877,9 +1139,12 @@ model PostPollVotedUser {
 
   userId      String
   user        User @relation(fields: [userId], references: [id])
+  @@index([userId])
+  @@index([pollChoiceId])
 }
 
 model PostNotification {
+  @@map("post_notifications")
   id          String   @id
   createdAt   DateTime @default(now())
   type        Int
@@ -892,10 +1157,16 @@ model PostNotification {
 
   postId      String?
   post        Post?     @relation(fields: [postId], references: [id])
+
+  @@index([postId]) 
+  @@index([toId, createdAt])
+  @@index([byId])
+
 }
 
 
 model PostLike {
+  @@map("post_likes")
   id            String   @id
   
   postId        String
@@ -905,10 +1176,13 @@ model PostLike {
   likedBy       User @relation(fields: [likedById], references: [id])
   createdAt   DateTime @default(now())
 
+  @@index([likedById, createdAt(sort: Desc)])
+
   @@unique([postId, likedById])
 }
 
 model ChatNotice {
+  @@map("chat_notices")
   id          String   @id
   createdAt   DateTime @default(now())
   updatedAt   DateTime @default(now()) @updatedAt
@@ -926,6 +1200,7 @@ model ChatNotice {
 
 
 model ModAuditLog {
+  @@map("mod_audit_logs")
   id          String   @id
   createdAt   DateTime @default(now())
 
@@ -947,10 +1222,13 @@ model ModAuditLog {
   count        Int?
   reason       String?
   expireAt     DateTime?
+  @@index([createdAt])
+  @@index([actionById])
 }
 
 
 model AuditLog {
+  @@map("audit_logs")
   id          String   @id
   createdAt   DateTime @default(now())
   actionType   String
@@ -963,10 +1241,12 @@ model AuditLog {
 
   @@index([actionById, createdAt])
   @@index([serverId, createdAt])
+  @@index([createdAt])
 }
 
 
 model Reminder {
+  @@map("reminders")
   id          String   @id
   createdAt   DateTime @default(now())
 
@@ -983,4 +1263,20 @@ model Reminder {
   channelId String?
   channel   Channel? @relation(fields: [channelId], references: [id], onDelete: SetNull)
 
+}
+
+model ExternalEmbed {
+  @@map("external_embeds")
+  id          String   @id
+
+  type        Int
+
+  serverId String? @unique
+  server   Server? @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  serverInviteCode String? @unique
+  serverInvite ServerInvite? @relation(fields: [serverInviteCode], references: [code], onDelete: SetNull)
+
+  userId String? @unique
+  user   User? @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
